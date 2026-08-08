@@ -1,0 +1,17 @@
+[package]
+name = "muon-store"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+muon = { path = "../muon", features = ["default"], version = "0.20.1" }
+muon-store-derive = { path = "../muon-store-derive" }
+erased-serde = "0.4"
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror = "2.0.19"
+or_poisoned = "0.1.0"
+indexmap = { version = "2", optional = true }
+
+[features]
+indexmap = ["dep:indexmap", "muon/indexmap"]

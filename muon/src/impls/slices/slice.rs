@@ -1,0 +1,846 @@
+use std::cmp::Ordering;
+use std::fmt::Debug;
+use std::marker::PhantomData;
+use std::mem::MaybeUninit;
+use std::ops::{Deref, DerefMut, Index, IndexMut, Range, RangeBounds};
+use std::slice::{
+    ChunkByMut, ChunksExactMut, ChunksMut, GetDisjointMutError, IterMut, RChunksExactMut,
+    RChunksMut, RSplitMut, RSplitNMut, SplitInclusiveMut, SplitMut, SplitNMut,
+};
+
+use crate::Observe;
+use crate::general::{SerializeSnapshot, Snapshot, Unsize, UnsizeObserver};
+use crate::helper::macros::delegate_methods;
+use crate::helper::{
+    AsDeref, AsDerefMut, AsDerefPtrExt, Invalidate, Pointer, QuasiObserver, Succ, Unsigned, Zero,
+};
+use crate::impls::slices::helper::{GetDisjointMutIndexImpl, SliceIndexImpl};
+use crate::impls::slices::range_set::RangeSet;
+use crate::impls::vec::VecObserverState;
+use crate::observe::{DefaultSpec, Flush, FlushWith, Observer, QuasiSink, RoObserve, Sink};
+
+/// Trait for managing the internal observer storage within a slice observer.
+///
+/// Implementors provide initialization ([`observe`](Self::observe)) and element access
+/// ([`get`](Self::get), [`get_mut`](Self::get_mut)) for the per-element observers held by
+/// [`SliceObserver`].
+pub trait SliceObserverState: Invalidate<Self::Target> + Sized {
+    /// The slice-like type being observed.
+    type Target: AsRef<[<Self::Item as QuasiObserver>::Head]> + ?Sized;
+
+    /// The element [`Observer`] type.
+    type Item: Observer<InnerDepth = Zero, Head: Sized>;
+
+    /// Creates an [`Observer`] collection for the given target.
+    ///
+    /// # Safety
+    ///
+    /// The caller must ensure that `target` is a valid pointer to the observed value.
+    unsafe fn observe(target: *mut Self::Target) -> Self;
+
+    /// Ensures the observer(s) at `index` are initialized and returns a shared reference.
+    fn get<I: SliceIndexImpl>(
+        &self,
+        index: I,
+        slice: &mut Self::Target,
+    ) -> Option<&I::Output<Self::Item>>;
+
+    /// Ensures the observer(s) at `index` are initialized and returns a mutable reference.
+    fn get_mut<I: SliceIndexImpl>(
+        &mut self,
+        index: I,
+        slice: &mut Self::Target,
+    ) -> Option<&mut I::Output<Self::Item>>;
+}
+
+/// Flush logic for slice-backed observer state, parameterized by `S` and `D`.
+///
+/// This trait is generic over the head type `S` and depth `D`, allowing each implementor to
+/// choose its own mutability requirement: [`[O; N]`](prim@array) bounds `S: AsDeref<D>` (shared
+/// access), while [`VecObserverState`] bounds `S: AsDerefMut<D>` (mutable access for element
+/// relocation).
+pub trait SliceSerializeObserverState<S: ?Sized, D>: SliceObserverState {
+    /// Consumes the accumulated mutation state, flushes inner element observers, and returns the
+    /// collected [`Changes`](crate::Changes).
+    ///
+    /// This method must fully reset all internal state so that an immediately subsequent call with
+    /// no intervening mutations returns empty.
+    fn flush<Sk: Sink + ?Sized>(&mut self, ptr: &mut Pointer<S>, sink: &mut Sk)
+    where
+        Self::Item: Flush<Sk>;
+}
+
+/// Lazily-initialized element observer storage backed by [`MaybeUninit`].
+///
+/// Only indices tracked by `initialized` contain valid observers. The `data` vector is always sized
+/// to match the observed slice length, with unaccessed slots left as [`MaybeUninit::uninit()`].
+pub(crate) struct LazyVec<O> {
+    pub data: Vec<MaybeUninit<O>>,
+    /// The last known element address per slot, kept in sync with
+    /// `data`. A slot's observer is relocated only when its recorded
+    /// head differs from the current element address: an unconditional
+    /// write would invalidate a live shared reference to the same slot
+    /// (stacked borrows).
+    pub heads: Vec<*mut ()>,
+    pub initialized: RangeSet,
+}
+
+impl<O> LazyVec<O> {
+    pub fn new() -> Self {
+        Self {
+            data: Vec::new(),
+            heads: Vec::new(),
+            initialized: RangeSet::new(),
+        }
+    }
+
+    pub fn truncate(&mut self, new_len: usize) {
+        if new_len >= self.data.len() {
+            return;
+        }
+        for range in self.initialized.overlapping(&(new_len..self.data.len())) {
+            for i in range.start.max(new_len)..range.end {
+                unsafe { self.data[i].assume_init_drop() };
+            }
+        }
+        self.initialized.remove(new_len..self.data.len());
+        self.data.truncate(new_len);
+        self.heads.truncate(new_len);
+    }
+}
+
+impl<O> Drop for LazyVec<O> {
+    fn drop(&mut self) {
+        for range in self.initialized.iter() {
+            for i in range.clone() {
+                unsafe { self.data[i].assume_init_drop() };
+            }
+        }
+    }
+}
+
+impl<O> LazyVec<O>
+where
+    O: Observer<InnerDepth = Zero, Head: Sized>,
+{
+    pub fn relocate(&mut self, range: Range<usize>, slice: &mut [O::Head]) {
+        // Ensure data is sized to match the slice
+        if self.data.len() < slice.len() {
+            self.data.resize_with(slice.len(), MaybeUninit::uninit);
+            self.heads.resize(slice.len(), std::ptr::null_mut());
+        }
+        if self.data.len() > slice.len() {
+            self.truncate(slice.len());
+        }
+        if range.is_empty() {
+            return;
+        }
+        for gap in self.initialized.gaps(&range) {
+            for i in gap {
+                // Evaluate `&mut slice[i]` exactly once: a second
+                // evaluation would retag a new frame over the one the
+                // observer's `expose_provenance` recorded, breaking
+                // later pointer recovery.
+                let head = &mut slice[i] as *mut O::Head;
+                self.data[i] = MaybeUninit::new(unsafe { O::observe(head) });
+                self.heads[i] = head as *mut ();
+            }
+        }
+        for existing in self.initialized.overlapping(&range) {
+            for i in existing.clone() {
+                let head = &mut slice[i] as *mut O::Head;
+                // Always expose the current element address: the
+                // recovery pool must stay fresh for later derefs even
+                // when the observer is not rewritten (exposing has no
+                // write side effect and does not alias).
+                head.expose_provenance();
+                // Only relocate when the recorded head is stale. An
+                // unconditional write would invalidate a live shared
+                // reference to the same slot (stacked borrows); a
+                // stale head can only result from a `&mut` operation,
+                // which excludes any live shared reference by borrow
+                // checking.
+                if self.heads[i] != head as *mut () {
+                    unsafe { Observer::relocate(self.data[i].assume_init_mut(), head) };
+                    self.heads[i] = head as *mut ();
+                }
+            }
+        }
+        self.initialized.insert(range);
+    }
+}
+
+/// Observer implementation for slices `[T]`.
+pub struct SliceObserver<V, S: ?Sized, D = Zero> {
+    pub(super) ptr: Pointer<S>,
+    pub(super) state: V,
+    phantom: PhantomData<D>,
+}
+
+impl<V, S: ?Sized, D> Deref for SliceObserver<V, S, D> {
+    type Target = Pointer<S>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ptr
+    }
+}
+
+impl<V, S: ?Sized, D> DerefMut for SliceObserver<V, S, D> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        std::ptr::from_mut(self).expose_provenance();
+        Pointer::invalidate(&mut self.ptr);
+        &mut self.ptr
+    }
+}
+
+impl<V, S: ?Sized, D, T: ?Sized> QuasiObserver for SliceObserver<V, S, D>
+where
+    V: Invalidate<T>,
+    D: Unsigned,
+    S: AsDeref<D, Target = T>,
+{
+    type Head = S;
+    type OuterDepth = Succ<Zero>;
+    type InnerDepth = D;
+
+    fn invalidate(this: &mut Self) {
+        Invalidate::invalidate(&mut this.state, (*this.ptr).as_deref());
+    }
+}
+
+impl<V, S: ?Sized, D, T> Observer for SliceObserver<V, S, D>
+where
+    V: SliceObserverState,
+    V::Item: Observer<InnerDepth = Zero, Head = T>,
+    D: Unsigned,
+    S: AsDeref<D, Target = V::Target>,
+{
+    unsafe fn observe(head: *mut Self::Head) -> Self {
+        let this = Self {
+            state: unsafe { V::observe(head.as_deref_ptr::<D>()) },
+            ptr: unsafe { Pointer::new_unchecked(head) },
+            phantom: PhantomData,
+        };
+        Pointer::register_state::<_, D>(&this.ptr, &this.state);
+        this
+    }
+
+    unsafe fn relocate(this: &mut Self, head: *mut Self::Head) {
+        unsafe { Pointer::set_unchecked(this, head) };
+    }
+}
+
+impl<V, S: ?Sized, D, Sk: Sink + ?Sized> QuasiSink<Sk> for SliceObserver<V, S, D> {
+    type Operation = Sk::Operation;
+    type Identity = Sk::Identity;
+}
+
+impl<V, S: ?Sized, D, T: ?Sized, Sk: Sink + ?Sized, Elem: ?Sized> FlushWith<Sk, Elem>
+    for SliceObserver<V, S, D>
+where
+    V: SliceSerializeObserverState<S, D, Target = T>,
+    V::Item: Flush<Sk>,
+    D: Unsigned,
+    S: AsDeref<D, Target = T>,
+{
+    fn flush_with<F>(this: &mut Self, sink: &mut Sk, _flush_elem: F)
+    where
+        F: FnMut(&mut Elem, &mut Sk),
+    {
+        <Self as Flush<Sk>>::flush(this, sink)
+    }
+}
+
+impl<V, S: ?Sized, D, T: ?Sized, Sk: Sink + ?Sized> Flush<Sk> for SliceObserver<V, S, D>
+where
+    V: SliceSerializeObserverState<S, D, Target = T>,
+    V::Item: Flush<Sk>,
+    D: Unsigned,
+    S: AsDeref<D, Target = T>,
+{
+    fn flush(this: &mut Self, sink: &mut Sk) {
+        this.state.flush(&mut this.ptr, sink);
+    }
+}
+
+#[expect(clippy::type_complexity)]
+impl<V, S: ?Sized, D, T> SliceObserver<V, S, D>
+where
+    V: SliceObserverState,
+    V::Item: Observer<InnerDepth = Zero, Head = T>,
+    D: Unsigned,
+    S: AsDerefMut<D, Target = V::Target>,
+    S::Target: AsMut<[T]>,
+{
+    pub(crate) fn force_mut(&mut self) -> &mut [V::Item] {
+        let slice = (*self.ptr).as_deref_mut();
+        self.state.get_mut(.., slice).expect("index out of bounds")
+    }
+
+    // The `as_ref`/`as_mut` steps pin the inferred target: with
+    // `Target` an associated type, method resolution cannot infer
+    // `[T]` from `is_empty` alone.
+    fn nonempty_mut(&mut self) -> &mut [T] {
+        if (*self).untracked_ref().as_ref().is_empty() {
+            self.untracked_mut().as_mut()
+        } else {
+            self.tracked_mut().as_mut()
+        }
+    }
+
+    /// See [`slice::first_mut`].
+    pub fn first_mut(&mut self) -> Option<&mut V::Item> {
+        let slice = (*self.ptr).as_deref_mut();
+        self.state.get_mut(0usize, slice)
+    }
+
+    /// See [`slice::last_mut`].
+    pub fn last_mut(&mut self) -> Option<&mut V::Item> {
+        let slice = (*self.ptr).as_deref_mut();
+        let len = slice.as_ref().len();
+        if len == 0 {
+            None
+        } else {
+            self.state.get_mut(len - 1, slice)
+        }
+    }
+
+    /// See [`slice::first_chunk_mut`].
+    pub fn first_chunk_mut<const N: usize>(&mut self) -> Option<&mut [V::Item; N]> {
+        let slice = (*self.ptr).as_deref_mut();
+        self.state.get_mut(0..N, slice)?.try_into().ok()
+    }
+
+    delegate_methods! { force_mut() as slice =>
+        pub fn split_first_chunk_mut<const N: usize>(&mut self) -> Option<(&mut [V::Item; N], &mut [V::Item])>;
+        pub fn split_last_chunk_mut<const N: usize>(&mut self) -> Option<(&mut [V::Item], &mut [V::Item; N])>;
+    }
+
+    /// See [`slice::last_chunk_mut`].
+    pub fn last_chunk_mut<const N: usize>(&mut self) -> Option<&mut [V::Item; N]> {
+        let slice = (*self.ptr).as_deref_mut();
+        let len = slice.as_ref().len();
+        if len < N {
+            None
+        } else {
+            self.state.get_mut(len - N..len, slice)?.try_into().ok()
+        }
+    }
+
+    /// See [`slice::get_mut`].
+    pub fn get_mut<I: SliceIndexImpl>(&mut self, index: I) -> Option<&mut I::Output<V::Item>> {
+        let slice = (*self.ptr).as_deref_mut();
+        self.state.get_mut(index, slice)
+    }
+
+    /// See [`slice::get_unchecked_mut`].
+    ///
+    /// ## Safety
+    ///
+    /// See [`slice::get_unchecked_mut`] for safety requirements.
+    pub unsafe fn get_unchecked_mut<I: SliceIndexImpl>(
+        &mut self,
+        index: I,
+    ) -> &mut I::Output<V::Item> {
+        unsafe { self.get_mut(index).unwrap_unchecked() }
+    }
+
+    delegate_methods! { force_mut() as slice =>
+        pub fn as_mut_ptr(&mut self) -> *mut V::Item;
+        pub fn as_mut_ptr_range(&mut self) -> Range<*mut V::Item>;
+        #[rustversion::since(1.93)]
+        pub fn as_mut_array<const N: usize>(&mut self) -> Option<&mut [V::Item; N]>;
+    }
+
+    /// See [`slice::swap`].
+    pub fn swap(&mut self, a: usize, b: usize) {
+        QuasiObserver::invalidate(&mut self[a]);
+        QuasiObserver::invalidate(&mut self[b]);
+        self.untracked_mut().as_mut().swap(a, b);
+    }
+
+    delegate_methods! { nonempty_mut() as slice =>
+        pub fn reverse(&mut self);
+    }
+
+    delegate_methods! { force_mut() as slice =>
+        pub fn iter_mut(&mut self) -> IterMut<'_, V::Item>;
+        pub fn chunks_mut(&mut self, chunk_size: usize) -> ChunksMut<'_, V::Item>;
+        pub fn chunks_exact_mut(&mut self, chunk_size: usize) -> ChunksExactMut<'_, V::Item>;
+        pub unsafe fn as_chunks_unchecked_mut<const N: usize>(&mut self) -> &mut [[V::Item; N]];
+        pub fn as_chunks_mut<const N: usize>(&mut self) -> (&mut [[V::Item; N]], &mut [V::Item]);
+        pub fn as_rchunks_mut<const N: usize>(&mut self) -> (&mut [V::Item], &mut [[V::Item; N]]);
+        pub fn rchunks_mut(&mut self, chunk_size: usize) -> RChunksMut<'_, V::Item>;
+        pub fn rchunks_exact_mut(&mut self, chunk_size: usize) -> RChunksExactMut<'_, V::Item>;
+        pub fn chunk_by_mut<F>(&mut self, pred: F) -> ChunkByMut<'_, V::Item, F> where F: FnMut(&V::Item, &V::Item) -> bool;
+        pub fn split_at_mut(&mut self, mid: usize) -> (&mut [V::Item], &mut [V::Item]);
+        pub unsafe fn split_at_mut_unchecked(&mut self, mid: usize) -> (&mut [V::Item], &mut [V::Item]);
+        pub fn split_at_mut_checked(&mut self, mid: usize) -> Option<(&mut [V::Item], &mut [V::Item])>;
+        pub fn split_mut<F>(&mut self, pred: F) -> SplitMut<'_, V::Item, F> where F: FnMut(&V::Item) -> bool;
+        pub fn split_inclusive_mut<F>(&mut self, pred: F) -> SplitInclusiveMut<'_, V::Item, F> where F: FnMut(&V::Item) -> bool;
+        pub fn rsplit_mut<F>(&mut self, pred: F) -> RSplitMut<'_, V::Item, F> where F: FnMut(&V::Item) -> bool;
+        pub fn splitn_mut<F>(&mut self, n: usize, pred: F) -> SplitNMut<'_, V::Item, F> where F: FnMut(&V::Item) -> bool;
+        pub fn rsplitn_mut<F>(&mut self, n: usize, pred: F) -> RSplitNMut<'_, V::Item, F> where F: FnMut(&V::Item) -> bool;
+    }
+
+    delegate_methods! { nonempty_mut() as slice =>
+        pub fn sort_unstable(&mut self) where T: Ord;
+        pub fn sort_unstable_by<F>(&mut self, compare: F) where F: FnMut(&T, &T) -> Ordering;
+        pub fn sort_unstable_by_key<K, F>(&mut self, f: F) where F: FnMut(&T) -> K, K: Ord;
+        pub fn select_nth_unstable(&mut self, index: usize) -> (&mut [T], &mut T, &mut [T]) where T: Ord;
+        pub fn select_nth_unstable_by<F>(&mut self, index: usize, compare: F) -> (&mut [T], &mut T, &mut [T]) where F: FnMut(&T, &T) -> Ordering;
+        pub fn select_nth_unstable_by_key<K, F>(&mut self, index: usize, f: F) -> (&mut [T], &mut T, &mut [T]) where F: FnMut(&T) -> K, K: Ord;
+        pub fn rotate_left(&mut self, mid: usize);
+        pub fn rotate_right(&mut self, k: usize);
+        pub fn fill(&mut self, value: T) where T: Clone;
+        pub fn fill_with<F>(&mut self, f: F) where F: FnMut() -> T;
+        pub fn clone_from_slice(&mut self, src: &[T]) where T: Clone;
+        pub fn copy_from_slice(&mut self, src: &[T]) where T: Copy;
+        pub fn copy_within<R: RangeBounds<usize>>(&mut self, src: R, dest: usize) where T: Copy;
+        pub fn swap_with_slice(&mut self, other: &mut [T]);
+        pub unsafe fn align_to_mut<U>(&mut self) -> (&mut [T], &mut [U], &mut [T]);
+    }
+
+    /// See [`slice::get_disjoint_unchecked_mut`].
+    ///
+    /// ## Safety
+    ///
+    /// See [`slice::get_disjoint_unchecked_mut`] for safety requirements.
+    pub unsafe fn get_disjoint_unchecked_mut<I, const N: usize>(
+        &mut self,
+        indices: [I; N],
+    ) -> [&mut I::Output; N]
+    where
+        I: GetDisjointMutIndexImpl<V::Item>,
+    {
+        unsafe { GetDisjointMutIndexImpl::get_disjoint_unchecked_mut(self.force_mut(), indices) }
+    }
+
+    /// See [`slice::get_disjoint_unchecked_mut`].
+    pub fn get_disjoint_mut<I, const N: usize>(
+        &mut self,
+        indices: [I; N],
+    ) -> Result<[&mut I::Output; N], GetDisjointMutError>
+    where
+        I: GetDisjointMutIndexImpl<V::Item>,
+    {
+        GetDisjointMutIndexImpl::get_disjoint_mut(self.force_mut(), indices)
+    }
+
+    delegate_methods! { nonempty_mut() as slice =>
+        pub fn sort(&mut self) where T: Ord;
+        pub fn sort_by<F>(&mut self, compare: F) where F: FnMut(&T, &T) -> Ordering;
+        pub fn sort_by_key<K, F>(&mut self, f: F) where F: FnMut(&T) -> K, K: Ord;
+        pub fn sort_by_cached_key<K, F>(&mut self, f: F) where F: FnMut(&T) -> K, K: Ord;
+    }
+}
+
+impl<V, S: ?Sized, D> Debug for SliceObserver<V, S, D>
+where
+    V: SliceObserverState,
+    D: Unsigned,
+    S: AsDeref<D, Target = V::Target>,
+    V::Target: Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("SliceObserver")
+            .field(&self.untracked_ref())
+            .finish()
+    }
+}
+
+impl<V1, V2, S1: ?Sized, S2: ?Sized, D1, D2> PartialEq<SliceObserver<V2, S2, D2>>
+    for SliceObserver<V1, S1, D1>
+where
+    D1: Unsigned,
+    D2: Unsigned,
+    V1: SliceObserverState,
+    V2: SliceObserverState,
+    S1: AsDeref<D1, Target = V1::Target>,
+    S2: AsDeref<D2, Target = V2::Target>,
+    V1::Target: PartialEq<V2::Target>,
+{
+    fn eq(&self, other: &SliceObserver<V2, S2, D2>) -> bool {
+        self.untracked_ref().eq(other.untracked_ref())
+    }
+}
+
+impl<V, S: ?Sized, D> Eq for SliceObserver<V, S, D>
+where
+    D: Unsigned,
+    V: SliceObserverState,
+    S: AsDeref<D, Target = V::Target>,
+    V::Target: Eq,
+{
+}
+
+impl<V1, V2, S1: ?Sized, S2: ?Sized, D1, D2> PartialOrd<SliceObserver<V2, S2, D2>>
+    for SliceObserver<V1, S1, D1>
+where
+    D1: Unsigned,
+    D2: Unsigned,
+    V1: SliceObserverState,
+    V2: SliceObserverState,
+    S1: AsDeref<D1, Target = V1::Target>,
+    S2: AsDeref<D2, Target = V2::Target>,
+    V1::Target: PartialOrd<V2::Target>,
+{
+    fn partial_cmp(&self, other: &SliceObserver<V2, S2, D2>) -> Option<std::cmp::Ordering> {
+        self.untracked_ref().partial_cmp(other.untracked_ref())
+    }
+}
+
+impl<V, S: ?Sized, D> Ord for SliceObserver<V, S, D>
+where
+    D: Unsigned,
+    V: SliceObserverState,
+    S: AsDeref<D, Target = V::Target>,
+    V::Target: Ord,
+{
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.untracked_ref().cmp(other.untracked_ref())
+    }
+}
+
+impl<V, S: ?Sized, D, T, I> Index<I> for SliceObserver<V, S, D>
+where
+    V: SliceObserverState,
+    D: Unsigned,
+    S: AsDerefMut<D, Target = V::Target>,
+    V::Item: Observer<InnerDepth = Zero, Head = T>,
+    I: SliceIndexImpl,
+{
+    type Output = I::Output<V::Item>;
+
+    fn index(&self, index: I) -> &Self::Output {
+        let slice = unsafe { Pointer::as_mut(&self.ptr).as_deref_mut() };
+        self.state.get(index, slice).expect("index out of bounds")
+    }
+}
+
+impl<V, S: ?Sized, D, T, I> IndexMut<I> for SliceObserver<V, S, D>
+where
+    V: SliceObserverState,
+    D: Unsigned,
+    S: AsDerefMut<D, Target = V::Target>,
+    S::Target: AsMut<[T]>,
+    V::Item: Observer<InnerDepth = Zero, Head = T>,
+    I: SliceIndexImpl,
+{
+    fn index_mut(&mut self, index: I) -> &mut Self::Output {
+        let slice = (*self.ptr).as_deref_mut();
+        self.state
+            .get_mut(index, slice)
+            .expect("index out of bounds")
+    }
+}
+
+impl<T: Observe + SerializeSnapshot> Observe for [T] {
+    type Observer<'ob, S, D>
+        = SliceObserver<VecObserverState<T::Observer<'ob, T, Zero>>, S, D>
+    where
+        Self: 'ob,
+        D: Unsigned,
+        S: AsDerefMut<D, Target = Self> + ?Sized + 'ob;
+
+    type Spec = DefaultSpec;
+}
+
+impl<T> Unsize for [T] {
+    type Slice = Self;
+
+    fn len(&self) -> usize {
+        <[T]>::len(self)
+    }
+
+    fn range_from(&self, from: usize) -> &Self::Slice {
+        &self[from..]
+    }
+
+    unsafe fn removed_len(_ptr: *const u8, new_len: usize, old_len: usize) -> usize {
+        old_len - new_len
+    }
+}
+
+impl<T: SerializeSnapshot> RoObserve for [T] {
+    type Observer<'ob, S, D>
+        = UnsizeObserver<'ob, S, D>
+    where
+        Self: 'ob,
+        D: Unsigned,
+        S: AsDeref<D, Target = Self> + ?Sized + 'ob;
+
+    type Spec = DefaultSpec;
+}
+
+impl<T: Snapshot> Snapshot for [T] {
+    type Snapshot = Box<[T::Snapshot]>;
+
+    fn to_snapshot(&self) -> Box<[T::Snapshot]> {
+        self.iter().map(|v| v.to_snapshot()).collect()
+    }
+}
+
+impl<T: SerializeSnapshot> SerializeSnapshot for [T]
+where
+    Self::Snapshot: serde::Serialize + 'static,
+{
+    fn flush<S: Sink + ?Sized>(&self, snapshot: Box<[T::Snapshot]>, sink: &mut S) {
+        let mut snapshot = snapshot.into_vec().into_iter();
+        // Common prefix: per-element changes.
+        for (i, v) in self.iter().enumerate() {
+            sink.push_neg_index(self.len() - i);
+            if let Some(s) = snapshot.next() {
+                SerializeSnapshot::flush(&v, s, sink);
+            } else {
+                // Appended elements: no before value.
+                sink.replace(None, Some(v));
+            }
+            sink.pop_segment();
+        }
+        // Removed tail: no after value, before comes from the snapshot.
+        // Each removed element is addressed by its position from the tail
+        // of the previous value (`Negative(i + 1)`).
+        for (i, s) in snapshot.enumerate() {
+            sink.push_neg_index(i + 1);
+            sink.replace(Some(&s), None);
+            sink.pop_segment();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use muon_test_utils::*;
+    use serde_json::json;
+
+    use crate::helper::QuasiObserver;
+    use crate::observe::ObserveExt;
+
+    #[test]
+    fn index_by_usize() {
+        let slice: &mut [u32] = &mut [0, 1, 2];
+        let mut ob = slice.__observe();
+        assert_eq!(*ob[2].untracked_ref(), 2);
+        assert!(__flush!(&mut ob).is_empty());
+        *ob[2].tracked_mut() = 42;
+        assert_eq!(*ob[2].untracked_ref(), 42);
+        let changes = __flush!(&mut ob);
+        assert_eq!(
+            changes.into_json(),
+            json!([{"path": [-1], "before": 2, "after": 42}]),
+        );
+    }
+
+    #[test]
+    fn get_mut() {
+        let slice: &mut [u32] = &mut [0, 1, 2];
+        let mut ob = slice.__observe();
+        assert_eq!(*(*ob.get_mut(2).unwrap()).untracked_ref(), 2);
+        assert!(__flush!(&mut ob).is_empty());
+        *ob.get_mut(2).unwrap().tracked_mut() = 42;
+        assert_eq!(*(*ob.get_mut(2).unwrap()).untracked_ref(), 42);
+        let changes = __flush!(&mut ob);
+        assert_eq!(
+            changes.into_json(),
+            json!([{"path": [-1], "before": 2, "after": 42}]),
+        );
+    }
+
+    #[test]
+    fn swap() {
+        let slice: &mut [u32] = &mut [0, 1, 2];
+        let mut ob = slice.__observe();
+        ob.swap(0, 1);
+        assert_eq!(*ob.untracked_ref(), [1, 0, 2]);
+        let changes = __flush!(&mut ob);
+        assert_eq!(
+            changes.into_json(),
+            json!([
+                {"path": [-2], "before": 1, "after": 0},
+                {"path": [-3], "before": 0, "after": 1},
+            ]),
+        );
+    }
+
+    #[test]
+    fn boxed_slice_deref_mut_triggers_replace() {
+        let mut boxed: Box<[u32]> = vec![1, 2, 3].into_boxed_slice();
+        let mut ob = boxed.__observe();
+        // Mutate through the slice observer's DerefMut (e.g. via sort).
+        ob.sort();
+        let changes = __flush!(&mut ob);
+        // Even though sort is a no-op here (already sorted), DerefMut was triggered
+        // so a Replace should be emitted. With diff type `()`, this bug causes None.
+        assert!(
+            !changes.is_empty(),
+            "DerefMut on Box<[T]> should trigger Replace"
+        );
+    }
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+    use serde_json::json;
+
+    use crate::general::Snapshot;
+
+    #[test]
+    fn no_change() {
+        let slice: &[i32] = &[1, 2, 3];
+        let snapshot = slice.to_snapshot();
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn same_len_single_change() {
+        let slice: &[i32] = &[1, 99, 3];
+        let snapshot = [1i32, 2, 3].as_slice().to_snapshot();
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert_eq!(
+            changes.into_json(),
+            json!([{"path": [-2], "before": 2, "after": 99}]),
+        );
+    }
+
+    #[test]
+    fn same_len_all_changed() {
+        let slice: &[i32] = &[4, 5, 6];
+        let snapshot = [1i32, 2, 3].as_slice().to_snapshot();
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert_eq!(
+            changes.into_json(),
+            json!([
+                {"path": [-3], "before": 1, "after": 4},
+                {"path": [-2], "before": 2, "after": 5},
+                {"path": [-1], "before": 3, "after": 6},
+            ]),
+        );
+    }
+
+    #[test]
+    fn shorter_than_snapshot() {
+        let slice: &[i32] = &[1, 2];
+        let snapshot = [1i32, 2, 3, 4].as_slice().to_snapshot();
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert_eq!(
+            changes.into_json(),
+            json!([
+                {"path": [-1], "before": 3, "after": null},
+                {"path": [-2], "before": 4, "after": null},
+            ]),
+        );
+    }
+
+    #[test]
+    fn shorter_with_change() {
+        let slice: &[i32] = &[1, 99];
+        let snapshot = [1i32, 2, 3, 4].as_slice().to_snapshot();
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert_eq!(
+            changes.into_json(),
+            json!([
+                {"path": [-1], "before": 2, "after": 99},
+                {"path": [-1], "before": 3, "after": null},
+                {"path": [-2], "before": 4, "after": null},
+            ]),
+        );
+    }
+
+    #[test]
+    fn longer_than_snapshot() {
+        let slice: &[i32] = &[1, 2, 3, 4, 5];
+        let snapshot = [1i32, 2, 3].as_slice().to_snapshot();
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert_eq!(
+            changes.into_json(),
+            json!([
+                {"path": [-2], "before": null, "after": 4},
+                {"path": [-1], "before": null, "after": 5},
+            ]),
+        );
+    }
+
+    #[test]
+    fn longer_with_change() {
+        let slice: &[i32] = &[1, 99, 3, 4, 5];
+        let snapshot = [1i32, 2, 3].as_slice().to_snapshot();
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert_eq!(
+            changes.into_json(),
+            json!([
+                {"path": [-4], "before": 2, "after": 99},
+                {"path": [-2], "before": null, "after": 4},
+                {"path": [-1], "before": null, "after": 5},
+            ]),
+        );
+    }
+
+    #[test]
+    fn longer_all_common_changed() {
+        let slice: &[i32] = &[4, 5, 6, 7, 8];
+        let snapshot = [1i32, 2, 3].as_slice().to_snapshot();
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert_eq!(
+            changes.into_json(),
+            json!([
+                {"path": [-5], "before": 1, "after": 4},
+                {"path": [-4], "before": 2, "after": 5},
+                {"path": [-3], "before": 3, "after": 6},
+                {"path": [-2], "before": null, "after": 7},
+                {"path": [-1], "before": null, "after": 8},
+            ]),
+        );
+    }
+
+    #[test]
+    fn empty_to_nonempty() {
+        let slice: &[i32] = &[1, 2, 3];
+        let snapshot = <[i32]>::to_snapshot(&[]);
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert_eq!(
+            changes.into_json(),
+            json!([
+                {"path": [-3], "before": null, "after": 1},
+                {"path": [-2], "before": null, "after": 2},
+                {"path": [-1], "before": null, "after": 3},
+            ]),
+        );
+    }
+
+    #[test]
+    fn nonempty_to_empty() {
+        let slice: &[i32] = &[];
+        let snapshot = [1i32, 2, 3].as_slice().to_snapshot();
+        let mut __sink = crate::observe::ObserveSink::new();
+        crate::general::SerializeSnapshot::flush(&slice, snapshot, &mut __sink);
+        let changes = __sink.into_changes();
+        assert_eq!(
+            changes.into_json(),
+            json!([
+                {"path": [-1], "before": 1, "after": null},
+                {"path": [-2], "before": 2, "after": null},
+                {"path": [-3], "before": 3, "after": null},
+            ]),
+        );
+    }
+}

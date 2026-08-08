@@ -1,0 +1,39 @@
+# dependencies
+node_modules/
+
+# build artifacts
+target/
+out/
+dist/
+*.node
+*.tgz
+*.pdb
+**/*.rs.bk
+
+# napi-rs generated
+index.js
+index.d.ts
+index.d.cts
+
+# editor / OS / tooling
+.DS_Store
+.idea/
+*.swp
+.claude/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# caches
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# logs
+*.log
+
+# coverage
+coverage/
+*.lcov

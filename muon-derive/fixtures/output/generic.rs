@@ -1,0 +1,270 @@
+#[allow(unused_imports)]
+use muon::Observe;
+use serde::Serialize;
+#[rustfmt::skip]
+#[derive(Serialize)]
+#[serde(bound = "S: Serialize, U: Serialize, V: Serialize")]
+pub struct Foo<'a, S, T, U, V, const N: usize> {
+    #[serde(serialize_with = "serialize_mut_array")]
+    a: &'a mut [S; N],
+    #[serde(skip)]
+    pub b: Option<T>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub c: Option<U>,
+    pub d: V,
+}
+#[rustfmt::skip]
+#[allow(clippy::extra_unused_lifetimes)]
+const _: () = {
+    pub struct FooObserver<
+        'ob,
+        'a,
+        S,
+        T,
+        U,
+        V,
+        const N: usize,
+        _S: ?Sized,
+        _N = ::muon::helper::Zero,
+    >
+    where
+        &'a mut [S; N]: ::muon::Observe + 'ob,
+        Option<U>: ::muon::Observe + 'ob,
+        V: ::muon::general::SerializeSnapshot + ::serde::Serialize,
+    {
+        a: ::muon::observe::DefaultObserver<'ob, &'a mut [S; N]>,
+        pub b: ::muon::helper::Pointer<Option<T>>,
+        pub c: ::muon::observe::DefaultObserver<'ob, Option<U>>,
+        pub d: ::muon::general::ShallowObserver<'ob, V, V>,
+        __ptr: ::muon::helper::Pointer<_S>,
+        __phantom: ::std::marker::PhantomData<&'ob mut _N>,
+    }
+    #[automatically_derived]
+    impl<'ob, 'a, S, T, U, V, const N: usize, _S: ?Sized, _N> ::std::ops::Deref
+    for FooObserver<'ob, 'a, S, T, U, V, N, _S, _N>
+    where
+        &'a mut [S; N]: ::muon::Observe,
+        Option<U>: ::muon::Observe,
+        V: ::muon::general::SerializeSnapshot + ::serde::Serialize,
+    {
+        type Target = ::muon::helper::Pointer<_S>;
+        fn deref(&self) -> &Self::Target {
+            &self.__ptr
+        }
+    }
+    #[automatically_derived]
+    impl<'ob, 'a, S, T, U, V, const N: usize, _S: ?Sized, _N> ::std::ops::DerefMut
+    for FooObserver<'ob, 'a, S, T, U, V, N, _S, _N>
+    where
+        &'a mut [S; N]: ::muon::Observe,
+        Option<U>: ::muon::Observe,
+        V: ::muon::general::SerializeSnapshot + ::serde::Serialize,
+    {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            ::std::ptr::from_mut(self).expose_provenance();
+            ::muon::helper::QuasiObserver::invalidate(&mut self.__ptr);
+            ::muon::helper::QuasiObserver::invalidate(&mut self.a);
+            ::muon::helper::QuasiObserver::invalidate(&mut self.c);
+            ::muon::helper::QuasiObserver::invalidate(&mut self.d);
+            &mut self.__ptr
+        }
+    }
+    #[automatically_derived]
+    impl<
+        'ob,
+        'a,
+        S,
+        T,
+        U,
+        V,
+        const N: usize,
+        _S: ?Sized,
+        _N,
+    > ::muon::helper::QuasiObserver for FooObserver<'ob, 'a, S, T, U, V, N, _S, _N>
+    where
+        _S: ::muon::helper::AsDeref<_N>,
+        &'a mut [S; N]: ::muon::Observe,
+        Option<U>: ::muon::Observe,
+        V: ::muon::general::SerializeSnapshot + ::serde::Serialize,
+        _N: ::muon::helper::Unsigned,
+    {
+        type Head = _S;
+        type OuterDepth = ::muon::helper::Succ<::muon::helper::Zero>;
+        type InnerDepth = _N;
+        fn invalidate(this: &mut Self) {
+            ::muon::helper::QuasiObserver::invalidate(&mut this.a);
+            ::muon::helper::QuasiObserver::invalidate(&mut this.c);
+            ::muon::helper::QuasiObserver::invalidate(&mut this.d);
+        }
+    }
+    #[automatically_derived]
+    impl<'ob, 'a, S, T, U, V, const N: usize, _S: ?Sized, _N> ::muon::observe::Observer
+    for FooObserver<'ob, 'a, S, T, U, V, N, _S, _N>
+    where
+        Option<T>: 'ob,
+        V: 'ob,
+        &'a mut [S; N]: ::muon::Observe,
+        Option<U>: ::muon::Observe,
+        V: ::muon::general::SerializeSnapshot + ::serde::Serialize,
+        _S: ::muon::helper::AsDerefMut<_N, Target = Foo<'a, S, T, U, V, N>>,
+        _N: ::muon::helper::Unsigned,
+    {
+        #[inline(always)]
+        unsafe fn observe(head: *mut _S) -> Self {
+            unsafe {
+                let __value = ::muon::helper::AsDeref::<_N>::as_deref_ptr(head);
+                let a = ::muon::observe::Observer::observe(&raw mut (*__value).a);
+                let b = ::muon::helper::Pointer::new_unchecked(&raw mut (*__value).b);
+                let c = ::muon::observe::Observer::observe(&raw mut (*__value).c);
+                let d = ::muon::observe::Observer::observe(&raw mut (*__value).d);
+                Self {
+                    a,
+                    b,
+                    c,
+                    d,
+                    __ptr: ::muon::helper::Pointer::new_unchecked(head),
+                    __phantom: ::std::marker::PhantomData,
+                }
+            }
+        }
+        unsafe fn relocate(this: &mut Self, head: *mut _S) {
+            unsafe {
+                let __value = ::muon::helper::AsDeref::<_N>::as_deref_ptr(head);
+                ::muon::observe::Observer::relocate(&mut this.a, &raw mut (*__value).a);
+                ::muon::helper::Pointer::set_unchecked(&this.b, &raw mut (*__value).b);
+                ::muon::observe::Observer::relocate(&mut this.c, &raw mut (*__value).c);
+                ::muon::observe::Observer::relocate(&mut this.d, &raw mut (*__value).d);
+                ::muon::helper::Pointer::set_unchecked(this, head);
+            }
+        }
+    }
+    #[automatically_derived]
+    impl<
+        'ob,
+        'a,
+        S,
+        T,
+        U,
+        V,
+        const N: usize,
+        _S: ?Sized,
+        _N,
+        Sk: ::muon::observe::Sink + ?Sized,
+    > ::muon::observe::QuasiSink<Sk> for FooObserver<'ob, 'a, S, T, U, V, N, _S, _N>
+    where
+        &'a mut [S; N]: ::muon::Observe + 'ob,
+        Option<U>: ::muon::Observe + 'ob,
+        V: ::muon::general::SerializeSnapshot + ::serde::Serialize,
+    {
+        type Operation = Sk::Operation;
+        type Identity = Sk::Identity;
+    }
+    #[automatically_derived]
+    impl<
+        'ob,
+        'a,
+        S,
+        T,
+        U,
+        V,
+        const N: usize,
+        _S: ?Sized,
+        _N,
+        Sk: ::muon::observe::Sink + ?Sized,
+        Elem: ?Sized,
+    > ::muon::observe::FlushWith<Sk, Elem>
+    for FooObserver<'ob, 'a, S, T, U, V, N, _S, _N>
+    where
+        Foo<'a, S, T, U, V, N>: ::muon::helper::serde::Serialize + 'static,
+        Option<T>: 'ob,
+        V: 'ob,
+        &'a mut [S; N]: ::muon::Observe + 'ob,
+        Option<U>: ::muon::Observe + 'ob,
+        V: ::muon::general::SerializeSnapshot + ::serde::Serialize,
+        _S: ::muon::helper::AsDerefMut<_N, Target = Foo<'a, S, T, U, V, N>>,
+        _N: ::muon::helper::Unsigned,
+        ::muon::observe::DefaultObserver<
+            'ob,
+            &'a mut [S; N],
+        >: ::muon::observe::Flush<Sk>,
+        ::muon::observe::DefaultObserver<'ob, Option<U>>: ::muon::observe::Flush<Sk>,
+        ::muon::general::ShallowObserver<'ob, V, V>: ::muon::observe::Flush<Sk>,
+    {
+        fn flush_with<F>(this: &mut Self, sink: &mut Sk, _flush_elem: F)
+        where
+            F: FnMut(&mut Elem, &mut Sk),
+        {
+            <Self as ::muon::observe::Flush<Sk>>::flush(this, sink)
+        }
+    }
+    #[automatically_derived]
+    impl<
+        'ob,
+        'a,
+        S,
+        T,
+        U,
+        V,
+        const N: usize,
+        _S: ?Sized,
+        _N,
+        Sk: ::muon::observe::Sink + ?Sized,
+    > ::muon::observe::Flush<Sk> for FooObserver<'ob, 'a, S, T, U, V, N, _S, _N>
+    where
+        Foo<'a, S, T, U, V, N>: ::muon::helper::serde::Serialize + 'static,
+        Option<T>: 'ob,
+        V: 'ob,
+        &'a mut [S; N]: ::muon::Observe + 'ob,
+        Option<U>: ::muon::Observe + 'ob,
+        V: ::muon::general::SerializeSnapshot + ::serde::Serialize,
+        _S: ::muon::helper::AsDerefMut<_N, Target = Foo<'a, S, T, U, V, N>>,
+        _N: ::muon::helper::Unsigned,
+        ::muon::observe::DefaultObserver<
+            'ob,
+            &'a mut [S; N],
+        >: ::muon::observe::Flush<Sk>,
+        ::muon::observe::DefaultObserver<'ob, Option<U>>: ::muon::observe::Flush<Sk>,
+        ::muon::general::ShallowObserver<'ob, V, V>: ::muon::observe::Flush<Sk>,
+    {
+        #[inline(always)]
+        fn flush(this: &mut Self, sink: &mut Sk) {
+            sink.push_field("a");
+            ::muon::observe::Flush::flush(&mut this.a, sink);
+            sink.pop_segment();
+            sink.push_field("c");
+            ::muon::observe::Flush::flush(&mut this.c, sink);
+            sink.pop_segment();
+            sink.push_field("d");
+            ::muon::observe::Flush::flush(&mut this.d, sink);
+            sink.pop_segment();
+        }
+    }
+    #[automatically_derived]
+    impl<'a, S, T, U, V, const N: usize> ::muon::Observe for Foo<'a, S, T, U, V, N>
+    where
+        Self: ::muon::helper::serde::Serialize,
+        &'a mut [S; N]: ::muon::Observe,
+        Option<U>: ::muon::Observe,
+        V: ::muon::general::SerializeSnapshot + ::serde::Serialize,
+    {
+        type Observer<'ob, _S, _N> = FooObserver<'ob, 'a, S, T, U, V, N, _S, _N>
+        where
+            Self: 'ob,
+            &'a mut [S; N]: 'ob,
+            Option<U>: 'ob,
+            _N: ::muon::helper::Unsigned,
+            _S: ::muon::helper::AsDerefMut<_N, Target = Self> + ?Sized + 'ob;
+        type Spec = ::muon::observe::DefaultSpec;
+    }
+};
+#[rustfmt::skip]
+fn serialize_mut_array<T, S, const N: usize>(
+    a: &&mut [T; N],
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    T: Serialize,
+    S: serde::Serializer,
+{
+    <[_]>::serialize(&**a, serializer)
+}
