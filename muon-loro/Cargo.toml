@@ -1,0 +1,13 @@
+[package]
+name = "muon-loro"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Loro observers for kernel"
+
+[dependencies]
+loro = "1.16.0"
+kernel = { path = "../kernel", default-features = false, features = ["std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = "2.0.19"

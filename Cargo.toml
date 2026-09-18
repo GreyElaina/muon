@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["muon", "muon-derive", "muon-test-utils", "muon-store", "muon-store-derive", "muon-store-benches", "muon-sync", "muon-reactivity", "muon-reactivity-derive"]
+members = ["kernel", "muon", "muon-loro", "muon-derive", "muon-test-utils", "muon-store", "muon-store-derive", "muon-store-benches", "muon-sync", "muon-reactivity", "muon-reactivity-derive"]
 
 [workspace.dependencies]
 serde = { version = "1.0", features = ["derive"] }

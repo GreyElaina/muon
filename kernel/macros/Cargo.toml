@@ -1,0 +1,16 @@
+[package]
+name = "kernel-macros"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Syntax transforms for the kernel observation runtime"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+darling = "0.20.11"
+proc-macro-crate = "3"
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit-mut"] }
