@@ -12,3 +12,10 @@ std = ["alloc"]
 
 [dependencies]
 kernel-macros = { path = "macros" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "observation"
+harness = false

@@ -110,11 +110,10 @@ impl<O, Lock, Head: ?Sized, Depth> DerefMut for LockObserver<O, Lock, Head, Dept
 
 impl<T, O, Lock, Head: ?Sized, Depth> QuasiObserver for LockObserver<O, Lock, Head, Depth>
 where
-    O: QuasiObserver<Head = T, InnerDepth = Zero>,
+    O: Observer<Head = T, InnerDepth = Zero>,
     Depth: Unsigned,
     Head: AsDerefMut<Depth>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -124,7 +123,7 @@ where
 
     fn untracked_ref<Value: ?Sized>(&self) -> &Value
     where
-        Self::Head: AsDeref<Self::InnerDepth, Target = Value>,
+        crate::HeadOf<Self>: AsDeref<Self::InnerDepth, Target = Value>,
     {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head)
@@ -146,6 +145,8 @@ where
     Depth: Unsigned,
     Head: AsDerefMut<Depth, Target = Lock>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let lock = AsDeref::<Depth>::as_deref_ptr(head);
@@ -320,10 +321,11 @@ where
 }
 
 /// Observer for a value protected by [`Mutex`].
-pub type MutexObserver<T, O, Head, Depth = Zero> = LockObserver<O, Mutex<T>, Head, Depth>;
+pub type MutexObserver<O, Head, Depth = Zero> =
+    LockObserver<O, Mutex<<O as Observer>::Head>, Head, Depth>;
 
 /// A [`MutexGuard`] paired with the mutex's persistent child observer.
-pub type ObservedMutexGuard<'a, T, O> = ObservedGuardMut<'a, MutexGuard<'a, T>, O>;
+pub type ObservedMutexGuard<'a, O> = ObservedGuardMut<'a, MutexGuard<'a, <O as Observer>::Head>, O>;
 
 impl<T, O, Head: ?Sized, Depth> LockObserver<O, Mutex<T>, Head, Depth>
 where
@@ -332,12 +334,12 @@ where
     Head: AsDerefMut<Depth, Target = Mutex<T>>,
 {
     /// Locks the value and pairs the guard with its child observer.
-    pub fn lock(&self) -> LockResult<ObservedMutexGuard<'_, T, O>> {
+    pub fn lock(&self) -> LockResult<ObservedMutexGuard<'_, O>> {
         self.acquire()
     }
 
     /// Attempts to lock the value and pair the guard with its child observer.
-    pub fn try_lock(&self) -> TryLockResult<ObservedMutexGuard<'_, T, O>> {
+    pub fn try_lock(&self) -> TryLockResult<ObservedMutexGuard<'_, O>> {
         self.try_acquire()
     }
 }
@@ -347,20 +349,23 @@ where
     T: Observe<T, Selection>,
 {
     type Observer<Head, Depth>
-        = MutexObserver<T, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
+        = MutexObserver<<T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;
 }
 
 /// Observer for a value protected by [`RwLock`].
-pub type RwLockObserver<T, O, Head, Depth = Zero> = LockObserver<O, RwLock<T>, Head, Depth>;
+pub type RwLockObserver<O, Head, Depth = Zero> =
+    LockObserver<O, RwLock<<O as Observer>::Head>, Head, Depth>;
 
 /// A [`RwLockReadGuard`] paired with the lock's persistent child observer.
-pub type ObservedRwLockReadGuard<'a, T, O> = ObservedGuard<'a, RwLockReadGuard<'a, T>, O>;
+pub type ObservedRwLockReadGuard<'a, O> =
+    ObservedGuard<'a, RwLockReadGuard<'a, <O as Observer>::Head>, O>;
 
 /// A [`RwLockWriteGuard`] paired with the lock's persistent child observer.
-pub type ObservedRwLockWriteGuard<'a, T, O> = ObservedGuardMut<'a, RwLockWriteGuard<'a, T>, O>;
+pub type ObservedRwLockWriteGuard<'a, O> =
+    ObservedGuardMut<'a, RwLockWriteGuard<'a, <O as Observer>::Head>, O>;
 
 impl<T, O, Head: ?Sized, Depth> LockObserver<O, RwLock<T>, Head, Depth>
 where
@@ -394,7 +399,7 @@ where
     }
 
     /// Read-locks the value and pairs the guard with its shared child observer.
-    pub fn read(&self) -> LockResult<ObservedRwLockReadGuard<'_, T, O>> {
+    pub fn read(&self) -> LockResult<ObservedRwLockReadGuard<'_, O>> {
         self.refresh_for_read();
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let lock = AsDeref::<Depth>::as_deref(head);
@@ -409,7 +414,7 @@ where
     }
 
     /// Attempts to read-lock the value and pair it with its shared child observer.
-    pub fn try_read(&self) -> TryLockResult<ObservedRwLockReadGuard<'_, T, O>> {
+    pub fn try_read(&self) -> TryLockResult<ObservedRwLockReadGuard<'_, O>> {
         if !self.try_refresh_for_read() {
             return Err(TryLockError::WouldBlock);
         }
@@ -429,12 +434,12 @@ where
     }
 
     /// Write-locks the value and pairs the guard with its mutable child observer.
-    pub fn write(&self) -> LockResult<ObservedRwLockWriteGuard<'_, T, O>> {
+    pub fn write(&self) -> LockResult<ObservedRwLockWriteGuard<'_, O>> {
         self.acquire()
     }
 
     /// Attempts to write-lock the value and pair the guard with its mutable child observer.
-    pub fn try_write(&self) -> TryLockResult<ObservedRwLockWriteGuard<'_, T, O>> {
+    pub fn try_write(&self) -> TryLockResult<ObservedRwLockWriteGuard<'_, O>> {
         self.try_acquire()
     }
 }
@@ -444,7 +449,7 @@ where
     T: Observe<T, Selection>,
 {
     type Observer<Head, Depth>
-        = RwLockObserver<T, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
+        = RwLockObserver<<T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;

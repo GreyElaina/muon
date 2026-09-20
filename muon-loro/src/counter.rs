@@ -99,7 +99,7 @@ where
     }
 }
 
-pub type CounterObserver<Head, Depth = Zero> = RecordingObserver<Counter, f64, Head, Depth>;
+pub type CounterObserver<Head, Depth = Zero> = RecordingObserver<f64, Head, Depth>;
 
 impl ObserveWith for Counter {
     type Observer<Head, Depth>

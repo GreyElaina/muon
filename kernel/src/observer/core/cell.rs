@@ -16,14 +16,14 @@ use crate::{Observer, ObserverSlot, Pointer, QuasiObserver, Succ, Unsigned, Zero
 /// [`CellObserver::get_mut`] exposes that observer directly. Escaping to the underlying `Cell`
 /// through [`Deref`] conservatively replaces the whole cell, because arbitrary shared code may
 /// mutate it.
-pub struct CellObserver<T, O, Head: ?Sized, Depth = Zero> {
+pub struct CellObserver<O, Head: ?Sized, Depth = Zero> {
     pointer: Pointer<Head>,
     child: ObserverSlot<O>,
 
-    marker: PhantomData<(T, Depth)>,
+    marker: PhantomData<Depth>,
 }
 
-impl<T, O, Head: ?Sized, Depth> Deref for CellObserver<T, O, Head, Depth> {
+impl<O, Head: ?Sized, Depth> Deref for CellObserver<O, Head, Depth> {
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
@@ -32,20 +32,19 @@ impl<T, O, Head: ?Sized, Depth> Deref for CellObserver<T, O, Head, Depth> {
     }
 }
 
-impl<T, O, Head: ?Sized, Depth> DerefMut for CellObserver<T, O, Head, Depth> {
+impl<O, Head: ?Sized, Depth> DerefMut for CellObserver<O, Head, Depth> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.child.invalidate();
         &mut self.pointer
     }
 }
 
-impl<T, O, Head: ?Sized, Depth> QuasiObserver for CellObserver<T, O, Head, Depth>
+impl<O, Head: ?Sized, Depth> QuasiObserver for CellObserver<O, Head, Depth>
 where
-    O: QuasiObserver<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
     Depth: Unsigned,
     Head: AsDerefMut<Depth>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -55,7 +54,7 @@ where
 
     fn untracked_ref<Value: ?Sized>(&self) -> &Value
     where
-        Self::Head: AsDeref<Self::InnerDepth, Target = Value>,
+        crate::HeadOf<Self>: AsDeref<Self::InnerDepth, Target = Value>,
     {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head)
@@ -70,12 +69,15 @@ where
     }
 }
 
-unsafe impl<T, O, Head: ?Sized, Depth> Observer for CellObserver<T, O, Head, Depth>
+unsafe impl<O, Head: ?Sized, Depth> Observer for CellObserver<O, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
-    Head: AsDerefMut<Depth, Target = Cell<T>>,
+    Head: AsDerefMut<Depth, Target = Cell<O::Head>>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let cell = AsDeref::<Depth>::as_deref_ptr(head);
@@ -105,21 +107,21 @@ where
     }
 }
 
-impl<T, O, Head: ?Sized, Depth, Context: ?Sized, ParentRoute, InnerRoute, Error, Semantic, Tail>
+impl<O, Head: ?Sized, Depth, Context: ?Sized, ParentRoute, InnerRoute, Error, Semantic, Tail>
     Collect<Context, (ParentRoute, InnerRoute), Error, Scope<Semantic, Tail>>
-    for CellObserver<T, O, Head, Depth>
+    for CellObserver<O, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>
-        + Collect<Context, InnerRoute, Error, Scope<Semantic, Tail>>,
+    O: Observer<InnerDepth = Zero> + Collect<Context, InnerRoute, Error, Scope<Semantic, Tail>>,
+    O::Head: Sized,
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = Cell<T>>,
-    for<'a> Context: Query<Change<'a, Cell<T>>, ParentRoute, Semantic>,
-    for<'a> <Context as Query<Change<'a, Cell<T>>, ParentRoute, Semantic>>::Output:
-        Replace<Cell<T>, Cell<T>>,
+    Head: AsDeref<Depth, Target = Cell<O::Head>>,
+    for<'a> Context: Query<Change<'a, Cell<O::Head>>, ParentRoute, Semantic>,
+    for<'a> <Context as Query<Change<'a, Cell<O::Head>>, ParentRoute, Semantic>>::Output:
+        Replace<Cell<O::Head>, Cell<O::Head>>,
     for<'a> Error: From<
-        <<Context as Query<Change<'a, Cell<T>>, ParentRoute, Semantic>>::Output as Replace<
-            Cell<T>,
-            Cell<T>,
+        <<Context as Query<Change<'a, Cell<O::Head>>, ParentRoute, Semantic>>::Output as Replace<
+            Cell<O::Head>,
+            Cell<O::Head>,
         >>::Error,
     >,
 {
@@ -145,11 +147,12 @@ where
     }
 }
 
-impl<T, O, Head: ?Sized, Depth> CellObserver<T, O, Head, Depth>
+impl<O, Head: ?Sized, Depth> CellObserver<O, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized + AsDeref<Zero, Target = O::Head>,
     Depth: Unsigned,
-    Head: AsDerefMut<Depth, Target = Cell<T>>,
+    Head: AsDerefMut<Depth, Target = Cell<O::Head>>,
 {
     fn refresh_child(&mut self) {
         if !self.child.is_stale() {
@@ -164,9 +167,12 @@ where
     ///
     /// The mutable receiver prevents another access through this observer while the returned
     /// reference remains live.
-    pub fn get(&mut self) -> &T {
+    pub fn get(&mut self) -> &O::Head {
         self.refresh_child();
-        QuasiObserver::untracked_ref(unsafe { self.child.observer_mut() })
+        let observer = unsafe { self.child.observer_mut() };
+        let pointer =
+            <O as crate::AsDerefCoinductive<O::OuterDepth>>::as_deref_coinductive(observer);
+        unsafe { Pointer::as_ref(pointer) }
     }
 
     /// Returns the observer for the value currently stored in the cell.
@@ -176,30 +182,30 @@ where
     }
 
     /// Replaces the stored value and conservatively records a whole-cell replacement.
-    pub fn set(&self, value: T) {
+    pub fn set(&self, value: O::Head) {
         self.child.invalidate();
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head).set(value);
     }
 
     /// Replaces the stored value, returning its previous value.
-    pub fn replace(&self, value: T) -> T {
+    pub fn replace(&self, value: O::Head) -> O::Head {
         self.child.invalidate();
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head).replace(value)
     }
 
     /// Swaps this cell's value with another cell and conservatively records this cell as replaced.
-    pub fn swap(&self, other: &Cell<T>) {
+    pub fn swap(&self, other: &Cell<O::Head>) {
         self.child.invalidate();
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head).swap(other);
     }
 
     /// Updates the stored value in place.
-    pub fn update(&self, update: impl FnOnce(T) -> T)
+    pub fn update(&self, update: impl FnOnce(O::Head) -> O::Head)
     where
-        T: Copy,
+        O::Head: Copy,
     {
         self.child.invalidate();
         let head = unsafe { Pointer::as_ref(&self.pointer) };
@@ -207,11 +213,11 @@ where
     }
 
     /// Takes the stored value, leaving its default behind.
-    pub fn take(&self) -> T
+    pub fn take(&self) -> O::Head
     where
-        T: Default,
+        O::Head: Default,
     {
-        self.replace(T::default())
+        self.replace(O::Head::default())
     }
 }
 
@@ -220,7 +226,7 @@ where
     T: Observe<T, Selection>,
 {
     type Observer<Head, Depth>
-        = CellObserver<T, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
+        = CellObserver<<T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;

@@ -2,7 +2,7 @@
 
 use crate::{
     AsDerefMut, Change, CollectState, Invalidate, Observe, Path, Query, Replace, State,
-    StateObserver, Unsigned, Zero, emit,
+    StatefulObserver, Unsigned, Zero, emit,
 };
 
 /// Initial-value state for a scalar observer.
@@ -13,7 +13,7 @@ pub struct ScalarState<T> {
 
 /// Observer used by the kernel's closed set of scalar values.
 #[doc(hidden)]
-pub type ScalarObserver<T, Head, Depth = Zero> = StateObserver<T, ScalarState<T>, Head, Depth>;
+pub type ScalarObserver<T, Head, Depth = Zero> = StatefulObserver<ScalarState<T>, Head, Depth>;
 
 impl<T: Copy> Invalidate<T> for ScalarState<T> {
     fn invalidate(&mut self, _: &T) {}

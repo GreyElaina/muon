@@ -8,14 +8,14 @@ use crate::{Collect, Composite, Field, Fields, Observe, Path};
 use super::{AsDeref, AsDerefMut, Observer, Pointer, QuasiObserver, Succ, Unsigned, Zero};
 
 /// Observer for `[T; N]` with one child observer per fixed position.
-pub struct ArrayObserver<T, O, Head: ?Sized, Depth, const N: usize> {
+pub struct ArrayObserver<O, Head: ?Sized, Depth, const N: usize> {
     fields: Fields<[Field<O>; N]>,
     pointer: Pointer<Head>,
 
-    marker: PhantomData<(T, Depth)>,
+    marker: PhantomData<Depth>,
 }
 
-impl<T, O, Head: ?Sized, Depth, const N: usize> Deref for ArrayObserver<T, O, Head, Depth, N> {
+impl<O, Head: ?Sized, Depth, const N: usize> Deref for ArrayObserver<O, Head, Depth, N> {
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
@@ -23,11 +23,12 @@ impl<T, O, Head: ?Sized, Depth, const N: usize> Deref for ArrayObserver<T, O, He
     }
 }
 
-impl<T, O, Head: ?Sized, Depth, const N: usize> DerefMut for ArrayObserver<T, O, Head, Depth, N>
+impl<O, Head: ?Sized, Depth, const N: usize> DerefMut for ArrayObserver<O, Head, Depth, N>
 where
-    O: QuasiObserver<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = [T; N]>,
+    Head: AsDeref<Depth, Target = [O::Head; N]>,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         QuasiObserver::invalidate(self);
@@ -35,9 +36,7 @@ where
     }
 }
 
-impl<T, O, Head: ?Sized, Depth, const N: usize> Index<usize>
-    for ArrayObserver<T, O, Head, Depth, N>
-{
+impl<O, Head: ?Sized, Depth, const N: usize> Index<usize> for ArrayObserver<O, Head, Depth, N> {
     type Output = Field<O>;
 
     fn index(&self, index: usize) -> &Self::Output {
@@ -45,23 +44,19 @@ impl<T, O, Head: ?Sized, Depth, const N: usize> Index<usize>
     }
 }
 
-impl<T, O, Head: ?Sized, Depth, const N: usize> IndexMut<usize>
-    for ArrayObserver<T, O, Head, Depth, N>
-{
+impl<O, Head: ?Sized, Depth, const N: usize> IndexMut<usize> for ArrayObserver<O, Head, Depth, N> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         &mut self.fields.0[index]
     }
 }
 
-impl<T, O, Head: ?Sized, Depth, const N: usize> QuasiObserver
-    for ArrayObserver<T, O, Head, Depth, N>
+impl<O, Head: ?Sized, Depth, const N: usize> QuasiObserver for ArrayObserver<O, Head, Depth, N>
 where
-    T: Sized,
-    O: QuasiObserver<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = [T; N]>,
+    Head: AsDeref<Depth, Target = [O::Head; N]>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -72,14 +67,15 @@ where
     }
 }
 
-unsafe impl<T, O, Head: ?Sized, Depth, const N: usize> Observer
-    for ArrayObserver<T, O, Head, Depth, N>
+unsafe impl<O, Head: ?Sized, Depth, const N: usize> Observer for ArrayObserver<O, Head, Depth, N>
 where
-    T: Sized,
-    O: Observer<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = [T; N]>,
+    Head: AsDeref<Depth, Target = [O::Head; N]>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let array = AsDeref::<Depth>::as_deref_ptr(head);
@@ -116,8 +112,8 @@ where
     }
 }
 
-impl<T, O, Head: ?Sized, Depth, Context: ?Sized, Route, Error, Scopes, const N: usize>
-    Collect<Context, Route, Error, Scopes> for ArrayObserver<T, O, Head, Depth, N>
+impl<O, Head: ?Sized, Depth, Context: ?Sized, Route, Error, Scopes, const N: usize>
+    Collect<Context, Route, Error, Scopes> for ArrayObserver<O, Head, Depth, N>
 where
     Fields<[Field<O>; N]>: Collect<Context, Route, Error, Scopes>,
 {
@@ -131,7 +127,7 @@ where
     T: Observe<T, Selection>,
 {
     type Observer<Head, Depth>
-        = ArrayObserver<T, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth, N>
+        = ArrayObserver<<T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth, N>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;

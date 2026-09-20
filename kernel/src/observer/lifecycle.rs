@@ -48,22 +48,39 @@ enum Phase {
     Poisoned,
 }
 
+type ObserverOf<Model, Selection> = <Model as Observe<Model, Selection>>::Observer<Model, Zero>;
+
 /// Long-lived observation state which can be rebound to a model for short access sessions.
-pub struct ObserverCell<O> {
-    observer: O,
+pub struct ObserverCell<Model: ?Sized, Selection>
+where
+    Model: Observe<Model, Selection>,
+{
+    observer: ObserverOf<Model, Selection>,
     phase: Phase,
 }
 
 /// A model owned together with reusable observation state.
-pub struct Observed<Model, O> {
+pub struct Observed<Model, Selection>
+where
+    Model: Observe<Model, Selection>,
+{
     model: Model,
-    observer: ObserverCell<O>,
+    observer: ObserverCell<Model, Selection>,
 }
 
-impl<Model, O> Observed<Model, O>
+impl<Model, Selection> Observed<Model, Selection>
 where
-    O: Observer<Head = Model>,
+    Model: Observe<Model, Selection>,
 {
+    /// Wraps a model with reusable observation state selected through an inferred route.
+    pub fn new(mut value: Model) -> Self {
+        let observer = ObserverCell::new(&mut value);
+        Self {
+            model: value,
+            observer,
+        }
+    }
+
     /// Conservatively invalidates observation state and returns arbitrary model access.
     ///
     /// Use an observer session for precise reads and mutations. This escape hatch exists for code
@@ -76,7 +93,7 @@ where
     /// Runs a tracked editing session.
     pub fn edit<Output>(
         &mut self,
-        body: impl FnOnce(&mut O) -> Output,
+        body: impl FnOnce(&mut ObserverOf<Model, Selection>) -> Output,
     ) -> Result<Output, Poisoned> {
         unsafe { self.observer.with(&mut self.model, body) }
     }
@@ -87,7 +104,7 @@ where
         context: &mut Context,
     ) -> Result<(), ObserverError<Error>>
     where
-        O: Collect<Context, Routes, Error, Scope<(), ()>>,
+        ObserverOf<Model, Selection>: Collect<Context, Routes, Error, Scope<(), ()>>,
     {
         unsafe { self.observer.collect(&mut self.model, context) }
     }
@@ -95,11 +112,11 @@ where
     /// Runs a tracked editing session and immediately delivers its facts.
     pub fn collect_with<Output, Context: ?Sized, Routes, Error>(
         &mut self,
-        body: impl FnOnce(&mut O) -> Output,
+        body: impl FnOnce(&mut ObserverOf<Model, Selection>) -> Output,
         context: &mut Context,
     ) -> Result<Output, ObserverError<Error>>
     where
-        O: Collect<Context, Routes, Error, Scope<(), ()>>,
+        ObserverOf<Model, Selection>: Collect<Context, Routes, Error, Scope<(), ()>>,
     {
         unsafe { self.observer.collect_with(&mut self.model, body, context) }
     }
@@ -115,18 +132,29 @@ where
     }
 }
 
-impl<O: Observer> ObserverCell<O> {
+impl<Model: ?Sized, Selection> ObserverCell<Model, Selection>
+where
+    Model: Observe<Model, Selection>,
+{
+    /// Creates reusable observation state selected through an inferred route.
+    pub fn new(value: &mut Model) -> Self {
+        Self {
+            observer: unsafe { Observer::observe(value) },
+            phase: Phase::Ready,
+        }
+    }
+
     /// Conservatively invalidates observation state and returns arbitrary model access.
     ///
     /// # Safety
     ///
     /// `model` must be the same logical value previously observed by this cell.
-    pub unsafe fn escape<'model>(&mut self, model: &'model mut O::Head) -> &'model mut O::Head {
+    pub unsafe fn escape<'model>(&mut self, model: &'model mut Model) -> &'model mut Model {
         if self.phase == Phase::Poisoned {
             return model;
         }
         self.phase = Phase::Poisoned;
-        unsafe { O::relocate(&mut self.observer, model) };
+        unsafe { ObserverOf::<Model, Selection>::relocate(&mut self.observer, model) };
         QuasiObserver::invalidate(&mut self.observer);
         self.phase = Phase::Ready;
         model
@@ -140,13 +168,13 @@ impl<O: Observer> ObserverCell<O> {
     /// but pending facts and retained child topology must still describe it.
     pub unsafe fn bind<'cell, 'model>(
         &'cell mut self,
-        model: &'model mut O::Head,
-    ) -> Result<ObserverGuard<'cell, 'model, O>, Poisoned> {
+        model: &'model mut Model,
+    ) -> Result<ObserverGuard<'cell, 'model, ObserverOf<Model, Selection>>, Poisoned> {
         if self.phase == Phase::Poisoned {
             return Err(Poisoned);
         }
         self.phase = Phase::Poisoned;
-        unsafe { O::relocate(&mut self.observer, model) };
+        unsafe { ObserverOf::<Model, Selection>::relocate(&mut self.observer, model) };
         self.phase = Phase::Ready;
         Ok(ObserverGuard {
             observer: &mut self.observer,
@@ -161,8 +189,8 @@ impl<O: Observer> ObserverCell<O> {
     /// `model` must be the same logical value previously observed by this cell.
     pub unsafe fn with<Output>(
         &mut self,
-        model: &mut O::Head,
-        body: impl FnOnce(&mut O) -> Output,
+        model: &mut Model,
+        body: impl FnOnce(&mut ObserverOf<Model, Selection>) -> Output,
     ) -> Result<Output, Poisoned> {
         let mut guard = unsafe { self.bind(model)? };
         Ok(body(&mut guard))
@@ -175,25 +203,25 @@ impl<O: Observer> ObserverCell<O> {
     /// `model` must be the same logical value previously observed by this cell.
     pub unsafe fn collect<Context: ?Sized, Routes, Error>(
         &mut self,
-        model: &mut O::Head,
+        model: &mut Model,
         context: &mut Context,
     ) -> Result<(), ObserverError<Error>>
     where
-        O: Collect<Context, Routes, Error, Scope<(), ()>>,
+        ObserverOf<Model, Selection>: Collect<Context, Routes, Error, Scope<(), ()>>,
     {
         if self.phase == Phase::Poisoned {
             return Err(ObserverError::Poisoned);
         }
 
         self.phase = Phase::Poisoned;
-        unsafe { O::relocate(&mut self.observer, model) };
+        unsafe { ObserverOf::<Model, Selection>::relocate(&mut self.observer, model) };
         Collect::<Context, Routes, Error, Scope<(), ()>>::collect(
             &mut self.observer,
             &Path::root(),
             context,
         )
         .map_err(ObserverError::Collect)?;
-        unsafe { O::rebase(&mut self.observer, model) };
+        unsafe { ObserverOf::<Model, Selection>::rebase(&mut self.observer, model) };
         self.phase = Phase::Ready;
         Ok(())
     }
@@ -203,7 +231,7 @@ impl<O: Observer> ObserverCell<O> {
         context: &mut Context,
     ) -> Result<(), ObserverError<Error>>
     where
-        O: Collect<Context, Routes, Error, Scope<(), ()>>,
+        ObserverOf<Model, Selection>: Collect<Context, Routes, Error, Scope<(), ()>>,
     {
         self.phase = Phase::Poisoned;
         Collect::<Context, Routes, Error, Scope<(), ()>>::collect(
@@ -222,31 +250,31 @@ impl<O: Observer> ObserverCell<O> {
     /// `model` must be the same logical value previously observed by this cell.
     pub unsafe fn collect_with<Output, Context: ?Sized, Routes, Error>(
         &mut self,
-        model: &mut O::Head,
-        body: impl FnOnce(&mut O) -> Output,
+        model: &mut Model,
+        body: impl FnOnce(&mut ObserverOf<Model, Selection>) -> Output,
         context: &mut Context,
     ) -> Result<Output, ObserverError<Error>>
     where
-        O: Collect<Context, Routes, Error, Scope<(), ()>>,
+        ObserverOf<Model, Selection>: Collect<Context, Routes, Error, Scope<(), ()>>,
     {
         if self.phase == Phase::Poisoned {
             return Err(ObserverError::Poisoned);
         }
 
         self.phase = Phase::Poisoned;
-        unsafe { O::relocate(&mut self.observer, model) };
+        unsafe { ObserverOf::<Model, Selection>::relocate(&mut self.observer, model) };
         self.phase = Phase::Ready;
         let output = body(&mut self.observer);
         self.deliver_bound(context)?;
-        unsafe { O::rebase(&mut self.observer, model) };
+        unsafe { ObserverOf::<Model, Selection>::rebase(&mut self.observer, model) };
         self.phase = Phase::Ready;
         Ok(output)
     }
 
     /// Discards pending facts and starts a new observation baseline at `model`.
-    pub fn reset(&mut self, model: &mut O::Head) {
+    pub fn reset(&mut self, model: &mut Model) {
         self.phase = Phase::Poisoned;
-        unsafe { O::rebase(&mut self.observer, model) };
+        unsafe { ObserverOf::<Model, Selection>::rebase(&mut self.observer, model) };
         self.phase = Phase::Ready;
     }
 }
@@ -269,30 +297,5 @@ impl<O: Observer> Deref for ObserverGuard<'_, '_, O> {
 impl<O: Observer> DerefMut for ObserverGuard<'_, '_, O> {
     fn deref_mut(&mut self) -> &mut O {
         self.observer
-    }
-}
-
-/// Creates reusable observation state selected through an inferred route.
-pub fn observer_cell<T, Route>(
-    value: &mut T,
-) -> ObserverCell<<T as Observe<T, Route>>::Observer<T, Zero>>
-where
-    T: Observe<T, Route> + ?Sized,
-{
-    ObserverCell {
-        observer: unsafe { Observer::observe(value) },
-        phase: Phase::Ready,
-    }
-}
-
-/// Wraps a model with reusable observation state selected through an inferred route.
-pub fn observed<T, Route>(mut value: T) -> Observed<T, <T as Observe<T, Route>>::Observer<T, Zero>>
-where
-    T: Observe<T, Route>,
-{
-    let observer = observer_cell(&mut value);
-    Observed {
-        model: value,
-        observer,
     }
 }

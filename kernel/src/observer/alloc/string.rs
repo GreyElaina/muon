@@ -5,7 +5,7 @@ use alloc::string::String;
 use crate::{AsDerefMut, Observe, ShallowObserver, Unsigned, Zero};
 
 /// Whole-value observer for [`String`].
-pub type StringObserver<Head, Depth = Zero> = ShallowObserver<String, Head, Depth>;
+pub type StringObserver<Head, Depth = Zero> = ShallowObserver<Head, Depth>;
 
 impl Observe for String {
     type Observer<Head, Depth>

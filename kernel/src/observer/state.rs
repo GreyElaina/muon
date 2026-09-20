@@ -20,7 +20,7 @@ pub trait State<T: ?Sized>: Invalidate<T> + Sized {
 
 /// Delivers the facts accumulated by an observer state.
 ///
-/// Raw-pointer recovery remains inside [`StateObserver`]; implementations receive an ordinary
+/// Raw-pointer recovery remains inside [`StatefulObserver`]; implementations receive an ordinary
 /// shared reference to the observed value at collection time.
 pub trait CollectState<T: ?Sized, Context: ?Sized, Route, Error, Semantic = ()>: State<T> {
     /// Delivers facts retained by this state for the final `value`.
@@ -28,14 +28,14 @@ pub trait CollectState<T: ?Sized, Context: ?Sized, Route, Error, Semantic = ()>:
 }
 
 /// Generic observer whose mutation semantics are supplied by `St`.
-pub struct StateObserver<T: ?Sized, St, Head: ?Sized, Depth = Zero> {
+pub struct StatefulObserver<St, Head: ?Sized, Depth = Zero> {
     pointer: Pointer<Head>,
     state: St,
 
-    marker: PhantomData<(fn(&mut T), Depth)>,
+    marker: PhantomData<Depth>,
 }
 
-impl<T: ?Sized, St, Head: ?Sized, Depth> StateObserver<T, St, Head, Depth> {
+impl<St, Head: ?Sized, Depth> StatefulObserver<St, Head, Depth> {
     /// Returns the observer-specific state.
     pub const fn state(&self) -> &St {
         &self.state
@@ -47,7 +47,7 @@ impl<T: ?Sized, St, Head: ?Sized, Depth> StateObserver<T, St, Head, Depth> {
     }
 }
 
-impl<T: ?Sized, St, Head: ?Sized, Depth> Deref for StateObserver<T, St, Head, Depth> {
+impl<St, Head: ?Sized, Depth> Deref for StatefulObserver<St, Head, Depth> {
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
@@ -55,11 +55,11 @@ impl<T: ?Sized, St, Head: ?Sized, Depth> Deref for StateObserver<T, St, Head, De
     }
 }
 
-impl<T: ?Sized, St, Head: ?Sized, Depth> DerefMut for StateObserver<T, St, Head, Depth>
+impl<St, Head: ?Sized, Depth> DerefMut for StatefulObserver<St, Head, Depth>
 where
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = T>,
-    St: Invalidate<T>,
+    Head: AsDeref<Depth>,
+    St: Invalidate<<Head as AsDeref<Depth>>::Target>,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         QuasiObserver::invalidate(self);
@@ -67,13 +67,12 @@ where
     }
 }
 
-impl<T: ?Sized, St, Head: ?Sized, Depth> QuasiObserver for StateObserver<T, St, Head, Depth>
+impl<St, Head: ?Sized, Depth> QuasiObserver for StatefulObserver<St, Head, Depth>
 where
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = T>,
-    St: Invalidate<T>,
+    Head: AsDeref<Depth>,
+    St: Invalidate<<Head as AsDeref<Depth>>::Target>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -83,12 +82,14 @@ where
     }
 }
 
-unsafe impl<T: ?Sized, St, Head: ?Sized, Depth> Observer for StateObserver<T, St, Head, Depth>
+unsafe impl<St, Head: ?Sized, Depth> Observer for StatefulObserver<St, Head, Depth>
 where
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = T>,
-    St: State<T>,
+    Head: AsDeref<Depth>,
+    St: State<<Head as AsDeref<Depth>>::Target>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Self::Head) -> Self {
         unsafe {
             let value = AsDeref::<Depth>::as_deref(&*head);
@@ -113,12 +114,12 @@ where
     }
 }
 
-impl<T: ?Sized, St, Head: ?Sized, Depth, Context: ?Sized, Route, Error, Semantic, Tail>
-    Collect<Context, Route, Error, Scope<Semantic, Tail>> for StateObserver<T, St, Head, Depth>
+impl<St, Head: ?Sized, Depth, Context: ?Sized, Route, Error, Semantic, Tail>
+    Collect<Context, Route, Error, Scope<Semantic, Tail>> for StatefulObserver<St, Head, Depth>
 where
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = T>,
-    St: CollectState<T, Context, Route, Error, Semantic>,
+    Head: AsDeref<Depth>,
+    St: CollectState<<Head as AsDeref<Depth>>::Target, Context, Route, Error, Semantic>,
 {
     fn collect(&mut self, path: &Path<'_>, context: &mut Context) -> Result<(), Error> {
         let value = unsafe { Pointer::as_ref(&self.pointer) };

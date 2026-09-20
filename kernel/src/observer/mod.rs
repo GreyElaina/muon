@@ -5,9 +5,9 @@ pub mod alloc;
 pub mod core;
 mod depth;
 mod deref;
-mod dirty;
 mod guard;
 mod lifecycle;
+mod misc;
 mod newtype;
 mod ops;
 mod pointer;
@@ -23,16 +23,14 @@ pub use depth::{
     AsDeref, AsDerefCoinductive, AsDerefMut, AsDerefMutCoinductive, AsDerefPtrExt, DerefPtr,
 };
 pub use deref::DerefObserver;
-pub use dirty::{Dirty, Noop, NoopObserver, ShallowObserver};
 pub use guard::{ObservedGuard, ObservedGuardMut};
-pub use lifecycle::{
-    Observed, ObserverCell, ObserverError, ObserverGuard, Poisoned, observed, observer_cell,
-};
+pub use lifecycle::{Observed, ObserverCell, ObserverError, ObserverGuard, Poisoned};
+pub use misc::{Dirty, Noop, NoopObserver, ShallowObserver};
 pub use newtype::{Newtype, NewtypeObserver};
 pub use pointer::Pointer;
-pub use quasi::{DerefMutUntracked, Invalidate, QuasiObserver};
+pub use quasi::{DerefMutUntracked, HeadOf, Invalidate, QuasiObserver};
 pub(crate) use slot::ObserverSlot;
-pub use state::{CollectState, State, StateObserver};
+pub use state::{CollectState, State, StatefulObserver};
 
 mod private {
     pub trait Sealed {}
@@ -61,8 +59,13 @@ impl<N: Unsigned> Unsigned for Succ<N> {}
 /// access the model while being dropped in an unbound state. `rebase` must additionally tolerate
 /// any live value of the same type because it establishes a new logical baseline.
 pub unsafe trait Observer:
-    QuasiObserver<Target = Pointer<<Self as QuasiObserver>::Head>> + Sized
+    QuasiObserver
+    + AsDerefMutCoinductive<<Self as QuasiObserver>::OuterDepth, Target = Pointer<Self::Head>>
+    + Sized
 {
+    /// Value held by the observer's internal [`Pointer`].
+    type Head: AsDeref<Self::InnerDepth> + ?Sized;
+
     /// # Safety
     /// `head` must be valid and exclusively borrowed for every access performed while constructing
     /// the observer. Retained links become inactive when the surrounding binding ends.

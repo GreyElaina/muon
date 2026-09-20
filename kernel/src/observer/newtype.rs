@@ -67,7 +67,7 @@ impl<O, Head: ?Sized, Depth> Deref for NewtypeObserver<O, Head, Depth> {
 
 impl<O, Head: ?Sized, Depth> DerefMut for NewtypeObserver<O, Head, Depth>
 where
-    O: QuasiObserver,
+    O: Observer,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target: Newtype<Inner = O::Head>>,
 {
@@ -79,11 +79,10 @@ where
 
 impl<O, Head: ?Sized, Depth> QuasiObserver for NewtypeObserver<O, Head, Depth>
 where
-    O: QuasiObserver,
+    O: Observer,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target: Newtype<Inner = O::Head>>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -98,6 +97,8 @@ where
     Depth: Unsigned,
     Head: AsDeref<Depth, Target: Newtype<Inner = O::Head>>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let value = AsDeref::<Depth>::as_deref_ptr(head);

@@ -45,8 +45,10 @@ impl<OkObserver, ErrObserver, Head: ?Sized, Depth> Deref
 impl<OkObserver, ErrObserver, Head: ?Sized, Depth> DerefMut
     for ResultObserver<OkObserver, ErrObserver, Head, Depth>
 where
-    OkObserver: QuasiObserver<InnerDepth = Zero, Head: Sized>,
-    ErrObserver: QuasiObserver<InnerDepth = Zero, Head: Sized>,
+    OkObserver: Observer<InnerDepth = Zero>,
+    OkObserver::Head: Sized,
+    ErrObserver: Observer<InnerDepth = Zero>,
+    ErrObserver::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Result<OkObserver::Head, ErrObserver::Head>>,
 {
@@ -59,12 +61,13 @@ where
 impl<OkObserver, ErrObserver, Head: ?Sized, Depth> QuasiObserver
     for ResultObserver<OkObserver, ErrObserver, Head, Depth>
 where
-    OkObserver: QuasiObserver<InnerDepth = Zero, Head: Sized>,
-    ErrObserver: QuasiObserver<InnerDepth = Zero, Head: Sized>,
+    OkObserver: Observer<InnerDepth = Zero>,
+    OkObserver::Head: Sized,
+    ErrObserver: Observer<InnerDepth = Zero>,
+    ErrObserver::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Result<OkObserver::Head, ErrObserver::Head>>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -76,11 +79,15 @@ where
 unsafe impl<OkObserver, ErrObserver, Head: ?Sized, Depth> Observer
     for ResultObserver<OkObserver, ErrObserver, Head, Depth>
 where
-    OkObserver: Observer<InnerDepth = Zero, Head: Sized>,
-    ErrObserver: Observer<InnerDepth = Zero, Head: Sized>,
+    OkObserver: Observer<InnerDepth = Zero>,
+    OkObserver::Head: Sized,
+    ErrObserver: Observer<InnerDepth = Zero>,
+    ErrObserver::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Result<OkObserver::Head, ErrObserver::Head>>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let result = AsDeref::<Depth>::as_deref_ptr(head);
@@ -161,8 +168,10 @@ impl<
 > Collect<Context, (ParentRoute, OkRoute, ErrRoute), Error, Scope<Semantic, Tail>>
     for ResultObserver<OkObserver, ErrObserver, Head, Depth>
 where
-    OkObserver: Observer<InnerDepth = Zero, Head: Sized>,
-    ErrObserver: Observer<InnerDepth = Zero, Head: Sized>,
+    OkObserver: Observer<InnerDepth = Zero>,
+    OkObserver::Head: Sized,
+    ErrObserver: Observer<InnerDepth = Zero>,
+    ErrObserver::Head: Sized,
     Field<OkObserver>: Collect<Context, OkRoute, Error, Scope<Semantic, Tail>>,
     Field<ErrObserver>: Collect<Context, ErrRoute, Error, Scope<Semantic, Tail>>,
     Depth: Unsigned,
@@ -221,8 +230,10 @@ where
 impl<OkObserver, ErrObserver, Head: ?Sized, Depth>
     ResultObserver<OkObserver, ErrObserver, Head, Depth>
 where
-    OkObserver: Observer<InnerDepth = Zero, Head: Sized>,
-    ErrObserver: Observer<InnerDepth = Zero, Head: Sized>,
+    OkObserver: Observer<InnerDepth = Zero>,
+    OkObserver::Head: Sized,
+    ErrObserver: Observer<InnerDepth = Zero>,
+    ErrObserver::Head: Sized,
     Depth: Unsigned,
     Head: AsDerefMut<Depth, Target = Result<OkObserver::Head, ErrObserver::Head>>,
 {

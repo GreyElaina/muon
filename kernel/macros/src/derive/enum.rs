@@ -142,9 +142,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
         });
 
     let mut observer_generics = without_defaults(input.generics.clone());
-    for selection in &selection_params {
-        observer_generics.params.push(parse_quote! { #selection });
-    }
     for child in &children {
         observer_generics.params.push(parse_quote! { #child });
     }
@@ -154,10 +151,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
     observer_generics
         .params
         .push(parse_quote! { #depth = __kernel_runtime::Zero });
-    observer_generics
-        .make_where_clause()
-        .predicates
-        .extend(selection_predicates.iter().cloned());
     let observer_declaration_generics = &observer_generics;
     let observer_declaration_where = observer_generics.where_clause.as_ref();
     let (observer_impl_generics, observer_type_generics, observer_where) =
@@ -165,7 +158,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
     let observer_arguments = quote! {
         <
             #(#input_arguments,)*
-            #(#selection_params,)*
             #(#actual_children,)*
             #head,
             #depth
@@ -252,7 +244,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
                 marker: ::core::marker::PhantomData<(
                     fn(&mut #model),
                     #depth,
-                    fn() -> (#(#selection_params,)*),
                 )>,
             }
 
@@ -279,7 +270,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
             impl #runtime_impl_generics __kernel_runtime::QuasiObserver
                 for #observer_ident #runtime_type_generics #runtime_where
             {
-                type Head = #head;
                 type OuterDepth = __kernel_runtime::Succ<__kernel_runtime::Zero>;
                 type InnerDepth = #depth;
 
@@ -292,6 +282,8 @@ pub(super) fn expand(input: &Input) -> TokenStream {
             unsafe impl #runtime_impl_generics __kernel_runtime::Observer
                 for #observer_ident #runtime_type_generics #runtime_where
             {
+                type Head = #head;
+
                 unsafe fn observe(head: *mut #head) -> Self {
                     unsafe {
                         let value = __kernel_runtime::AsDerefPtrExt::as_deref_ptr::<#depth>(head);

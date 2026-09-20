@@ -33,7 +33,7 @@ macro_rules! tuple_observer {
         impl<$($observer,)* Head: ?Sized, Depth> DerefMut
             for $name<$($observer,)* Head, Depth>
         where
-            $($observer: QuasiObserver<Head: Sized>,)*
+            $($observer: Observer, $observer::Head: Sized,)*
             Depth: Unsigned,
             Head: AsDeref<Depth, Target = ($($observer::Head,)*)>,
         {
@@ -46,11 +46,10 @@ macro_rules! tuple_observer {
         impl<$($observer,)* Head: ?Sized, Depth> QuasiObserver
             for $name<$($observer,)* Head, Depth>
         where
-            $($observer: QuasiObserver<Head: Sized>,)*
+            $($observer: Observer, $observer::Head: Sized,)*
             Depth: Unsigned,
             Head: AsDeref<Depth, Target = ($($observer::Head,)*)>,
         {
-            type Head = Head;
             type OuterDepth = Succ<Zero>;
             type InnerDepth = Depth;
 
@@ -63,10 +62,12 @@ macro_rules! tuple_observer {
         unsafe impl<$($observer,)* Head: ?Sized, Depth> Observer
             for $name<$($observer,)* Head, Depth>
         where
-            $($observer: Observer<InnerDepth = Zero, Head: Sized>,)*
+            $($observer: Observer<InnerDepth = Zero>, $observer::Head: Sized,)*
             Depth: Unsigned,
             Head: AsDeref<Depth, Target = ($($observer::Head,)*)>,
         {
+            type Head = Head;
+
             unsafe fn observe(head: *mut Head) -> Self {
                 unsafe {
                     let tuple = AsDeref::<Depth>::as_deref_ptr(head);

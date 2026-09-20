@@ -39,7 +39,7 @@ macro_rules! range_observer {
         impl<T, $($observer,)* Head: ?Sized, Depth> DerefMut
             for $name<T, $($observer,)* Head, Depth>
         where
-            $($observer: QuasiObserver<Head = T, InnerDepth = Zero>,)*
+            $($observer: Observer<Head = T, InnerDepth = Zero>,)*
             Depth: Unsigned,
             Head: AsDeref<Depth, Target = $range<T>>,
         {
@@ -53,11 +53,10 @@ macro_rules! range_observer {
             for $name<T, $($observer,)* Head, Depth>
         where
             T: Sized,
-            $($observer: QuasiObserver<Head = T, InnerDepth = Zero>,)*
+            $($observer: Observer<Head = T, InnerDepth = Zero>,)*
             Depth: Unsigned,
             Head: AsDeref<Depth, Target = $range<T>>,
         {
-            type Head = Head;
             type OuterDepth = Succ<Zero>;
             type InnerDepth = Depth;
 
@@ -75,6 +74,8 @@ macro_rules! range_observer {
             Depth: Unsigned,
             Head: AsDeref<Depth, Target = $range<T>>,
         {
+            type Head = Head;
+
             unsafe fn observe(head: *mut Head) -> Self {
                 unsafe {
                     let range = AsDeref::<Depth>::as_deref_ptr(head);
@@ -172,7 +173,7 @@ range_observer!(RangeToInclusive => RangeToInclusiveObserver {
 
 impl<T> Observe for RangeInclusive<T> {
     type Observer<Head, Depth>
-        = ShallowObserver<Self, Head, Depth>
+        = ShallowObserver<Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;

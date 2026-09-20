@@ -1,6 +1,12 @@
 use core::ops::{Deref, DerefMut};
 
-use super::{AsDeref, AsDerefMut, AsDerefMutCoinductive, Pointer, Unsigned, Zero};
+use super::{
+    AsDeref, AsDerefCoinductive, AsDerefMut, AsDerefMutCoinductive, Pointer, Unsigned, Zero,
+};
+
+/// Owner reached through a quasi-observer's anchor.
+pub type HeadOf<O> =
+    <<O as AsDerefCoinductive<<O as QuasiObserver>::OuterDepth>>::Target as Deref>::Target;
 
 /// Reaches a mutable target without running observer [`DerefMut`] hooks.
 pub trait DerefMutUntracked: DerefMut {
@@ -24,7 +30,7 @@ impl<S: ?Sized> DerefMutUntracked for Pointer<S> {
         D: Unsigned,
         U: AsDerefMutCoinductive<D, Target = Self> + ?Sized,
     {
-        unsafe { Pointer::as_mut(this.as_deref_coinductive()) }
+        unsafe { Pointer::as_mut(<U as AsDerefCoinductive<D>>::as_deref_coinductive(&*this)) }
     }
 }
 
@@ -32,14 +38,10 @@ impl<S: ?Sized> DerefMutUntracked for Pointer<S> {
 ///
 /// A quasi-observer exposes shared access, untracked mutable access, and tracked mutable access
 /// that first conservatively invalidates granular state.
-pub trait QuasiObserver:
-    AsDerefMutCoinductive<Self::OuterDepth, Target: Deref<Target = Self::Head>>
-{
-    /// Value held by the observer's internal [`Pointer`].
-    type Head: AsDeref<Self::InnerDepth> + ?Sized;
-    /// Dereference distance from this wrapper to its [`Pointer`].
+pub trait QuasiObserver: AsDerefMutCoinductive<Self::OuterDepth, Target: Deref> {
+    /// Dereference distance from this wrapper to its anchor handle.
     type OuterDepth: Unsigned;
-    /// Dereference distance from [`Self::Head`] to the observed value.
+    /// Dereference distance from [`crate::HeadOf<Self>`] to the observed value.
     type InnerDepth: Unsigned;
 
     /// Conservatively invalidates granular tracking state.
@@ -48,7 +50,7 @@ pub trait QuasiObserver:
     /// Returns the observed value without changing tracking state.
     fn untracked_ref<T: ?Sized>(&self) -> &T
     where
-        Self::Head: AsDeref<Self::InnerDepth, Target = T>,
+        crate::HeadOf<Self>: AsDeref<Self::InnerDepth, Target = T>,
     {
         self.as_deref_coinductive().deref().as_deref()
     }
@@ -57,7 +59,7 @@ pub trait QuasiObserver:
     fn untracked_mut<T: ?Sized>(&mut self) -> &mut T
     where
         Self::Target: DerefMutUntracked,
-        Self::Head: AsDerefMut<Self::InnerDepth, Target = T>,
+        crate::HeadOf<Self>: AsDerefMut<Self::InnerDepth, Target = T>,
     {
         DerefMutUntracked::deref_mut_untracked(self).as_deref_mut()
     }
@@ -66,7 +68,7 @@ pub trait QuasiObserver:
     fn tracked_mut<T: ?Sized>(&mut self) -> &mut T
     where
         Self::Target: DerefMutUntracked,
-        Self::Head: AsDerefMut<Self::InnerDepth, Target = T>,
+        crate::HeadOf<Self>: AsDerefMut<Self::InnerDepth, Target = T>,
     {
         Self::invalidate(self);
         DerefMutUntracked::deref_mut_untracked(self).as_deref_mut()
@@ -74,7 +76,6 @@ pub trait QuasiObserver:
 }
 
 impl<T: ?Sized> QuasiObserver for &T {
-    type Head = T;
     type OuterDepth = Zero;
     type InnerDepth = Zero;
 
@@ -82,7 +83,6 @@ impl<T: ?Sized> QuasiObserver for &T {
 }
 
 impl<T: ?Sized> QuasiObserver for &mut T {
-    type Head = T;
     type OuterDepth = Zero;
     type InnerDepth = Zero;
 

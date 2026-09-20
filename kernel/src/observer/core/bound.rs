@@ -42,7 +42,8 @@ impl<O, Head: ?Sized, Depth> Deref for BoundObserver<O, Head, Depth> {
 
 impl<O, Head: ?Sized, Depth> DerefMut for BoundObserver<O, Head, Depth>
 where
-    O: QuasiObserver<InnerDepth = Zero, Head: Sized>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Bound<O::Head>>,
 {
@@ -54,11 +55,11 @@ where
 
 impl<O, Head: ?Sized, Depth> QuasiObserver for BoundObserver<O, Head, Depth>
 where
-    O: QuasiObserver<InnerDepth = Zero, Head: Sized>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Bound<O::Head>>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -69,10 +70,13 @@ where
 
 unsafe impl<O, Head: ?Sized, Depth> Observer for BoundObserver<O, Head, Depth>
 where
-    O: Observer<InnerDepth = Zero, Head: Sized>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Bound<O::Head>>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let bound = AsDeref::<Depth>::as_deref_ptr(head);
@@ -155,7 +159,8 @@ impl<
 > Collect<Context, (ParentRoute, InnerRoute), Error, Scope<Semantic, Tail>>
     for BoundObserver<O, Head, Depth>
 where
-    O: Observer<InnerDepth = Zero, Head: Sized>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Field<O>: Collect<Context, InnerRoute, Error, Scope<Semantic, Tail>>,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Bound<O::Head>>,
@@ -201,7 +206,8 @@ where
 
 impl<O, Head: ?Sized, Depth> BoundObserver<O, Head, Depth>
 where
-    O: Observer<InnerDepth = Zero, Head: Sized>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
     Head: AsDerefMut<Depth, Target = Bound<O::Head>>,
 {

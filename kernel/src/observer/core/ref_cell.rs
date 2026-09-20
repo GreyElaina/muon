@@ -15,10 +15,10 @@ use crate::{
 };
 
 /// Shared dynamic borrow paired with the observed child.
-pub type ObservedRef<'a, T, O> = ObservedGuard<'a, Ref<'a, T>, O>;
+pub type ObservedRef<'a, O> = ObservedGuard<'a, Ref<'a, <O as Observer>::Head>, O>;
 
 /// Exclusive dynamic borrow paired with the observed child.
-pub type ObservedRefMut<'a, T, O> = ObservedGuardMut<'a, RefMut<'a, T>, O>;
+pub type ObservedRefMut<'a, O> = ObservedGuardMut<'a, RefMut<'a, <O as Observer>::Head>, O>;
 
 /// Failure to acquire a shared observed borrow.
 #[derive(Debug)]
@@ -46,14 +46,14 @@ impl core::error::Error for TryObservedBorrowError {}
 /// The child observer persists in the observation tree, while every access that uses it is
 /// protected by a fresh [`Ref`] or [`RefMut`] guard. Escaping to the underlying `RefCell`, or a
 /// leaked dynamic borrow detected during collection, conservatively replaces the whole cell.
-pub struct RefCellObserver<T, O, Head: ?Sized, Depth = Zero> {
+pub struct RefCellObserver<O, Head: ?Sized, Depth = Zero> {
     pointer: Pointer<Head>,
     child: ObserverSlot<O>,
 
-    marker: PhantomData<(T, Depth)>,
+    marker: PhantomData<Depth>,
 }
 
-impl<T, O, Head: ?Sized, Depth> Deref for RefCellObserver<T, O, Head, Depth> {
+impl<O, Head: ?Sized, Depth> Deref for RefCellObserver<O, Head, Depth> {
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
@@ -62,20 +62,19 @@ impl<T, O, Head: ?Sized, Depth> Deref for RefCellObserver<T, O, Head, Depth> {
     }
 }
 
-impl<T, O, Head: ?Sized, Depth> DerefMut for RefCellObserver<T, O, Head, Depth> {
+impl<O, Head: ?Sized, Depth> DerefMut for RefCellObserver<O, Head, Depth> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.child.invalidate();
         &mut self.pointer
     }
 }
 
-impl<T, O, Head: ?Sized, Depth> QuasiObserver for RefCellObserver<T, O, Head, Depth>
+impl<O, Head: ?Sized, Depth> QuasiObserver for RefCellObserver<O, Head, Depth>
 where
-    O: QuasiObserver<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
     Depth: Unsigned,
     Head: AsDerefMut<Depth>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -85,7 +84,7 @@ where
 
     fn untracked_ref<Value: ?Sized>(&self) -> &Value
     where
-        Self::Head: AsDeref<Self::InnerDepth, Target = Value>,
+        crate::HeadOf<Self>: AsDeref<Self::InnerDepth, Target = Value>,
     {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head)
@@ -100,12 +99,15 @@ where
     }
 }
 
-unsafe impl<T, O, Head: ?Sized, Depth> Observer for RefCellObserver<T, O, Head, Depth>
+unsafe impl<O, Head: ?Sized, Depth> Observer for RefCellObserver<O, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
-    Head: AsDerefMut<Depth, Target = RefCell<T>>,
+    Head: AsDerefMut<Depth, Target = RefCell<O::Head>>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let cell = AsDeref::<Depth>::as_deref_ptr(head);
@@ -135,21 +137,22 @@ where
     }
 }
 
-impl<T, O, Head: ?Sized, Depth, Context: ?Sized, ParentRoute, InnerRoute, Error, Semantic, Tail>
+impl<O, Head: ?Sized, Depth, Context: ?Sized, ParentRoute, InnerRoute, Error, Semantic, Tail>
     Collect<Context, (ParentRoute, InnerRoute), Error, Scope<Semantic, Tail>>
-    for RefCellObserver<T, O, Head, Depth>
+    for RefCellObserver<O, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>
+    O: Observer<InnerDepth = Zero>
         + Collect<Context, InnerRoute, Error, Scope<Semantic, Tail>>,
+    O::Head: Sized,
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = RefCell<T>>,
-    for<'a> Context: Query<Change<'a, RefCell<T>>, ParentRoute, Semantic>,
-    for<'a> <Context as Query<Change<'a, RefCell<T>>, ParentRoute, Semantic>>::Output:
-        Replace<RefCell<T>, RefCell<T>>,
+    Head: AsDeref<Depth, Target = RefCell<O::Head>>,
+    for<'a> Context: Query<Change<'a, RefCell<O::Head>>, ParentRoute, Semantic>,
+    for<'a> <Context as Query<Change<'a, RefCell<O::Head>>, ParentRoute, Semantic>>::Output:
+        Replace<RefCell<O::Head>, RefCell<O::Head>>,
     for<'a> Error: From<
-        <<Context as Query<Change<'a, RefCell<T>>, ParentRoute, Semantic>>::Output as Replace<
-            RefCell<T>,
-            RefCell<T>,
+        <<Context as Query<Change<'a, RefCell<O::Head>>, ParentRoute, Semantic>>::Output as Replace<
+            RefCell<O::Head>,
+            RefCell<O::Head>,
         >>::Error,
     >,
 {
@@ -179,11 +182,12 @@ where
     }
 }
 
-impl<T, O, Head: ?Sized, Depth> RefCellObserver<T, O, Head, Depth>
+impl<O, Head: ?Sized, Depth> RefCellObserver<O, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
-    Head: AsDerefMut<Depth, Target = RefCell<T>>,
+    Head: AsDerefMut<Depth, Target = RefCell<O::Head>>,
 {
     /// Returns the child observer using this observer's exclusive access to the cell.
     pub fn get_mut(&mut self) -> &mut O {
@@ -194,12 +198,12 @@ where
     }
 
     /// Immutably borrows the stored value and pairs the borrow with its child observer.
-    pub fn borrow(&self) -> ObservedRef<'_, T, O> {
+    pub fn borrow(&self) -> ObservedRef<'_, O> {
         self.try_borrow().unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// Attempts to immutably borrow the value and pair it with its child observer.
-    pub fn try_borrow(&self) -> Result<ObservedRef<'_, T, O>, TryObservedBorrowError> {
+    pub fn try_borrow(&self) -> Result<ObservedRef<'_, O>, TryObservedBorrowError> {
         if self.child.is_stale() {
             let head = unsafe { Pointer::as_ref(&self.pointer) };
             let cell = AsDeref::<Depth>::as_deref(head);
@@ -216,13 +220,13 @@ where
     }
 
     /// Mutably borrows the stored value and pairs the borrow with its child observer.
-    pub fn borrow_mut(&self) -> ObservedRefMut<'_, T, O> {
+    pub fn borrow_mut(&self) -> ObservedRefMut<'_, O> {
         self.try_borrow_mut()
             .unwrap_or_else(|error| panic!("{error}"))
     }
 
     /// Attempts to mutably borrow the value and pair it with its child observer.
-    pub fn try_borrow_mut(&self) -> Result<ObservedRefMut<'_, T, O>, BorrowMutError> {
+    pub fn try_borrow_mut(&self) -> Result<ObservedRefMut<'_, O>, BorrowMutError> {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let cell = AsDeref::<Depth>::as_deref(head);
         let guard = cell.try_borrow_mut()?;
@@ -230,31 +234,31 @@ where
     }
 
     /// Replaces the stored value and conservatively records a whole-cell replacement.
-    pub fn replace(&mut self, value: T) -> T {
+    pub fn replace(&mut self, value: O::Head) -> O::Head {
         self.child.invalidate();
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head).replace(value)
     }
 
     /// Replaces the stored value with the result of an observed update closure.
-    pub fn replace_with(&mut self, update: impl FnOnce(&mut O) -> T) -> T {
+    pub fn replace_with(&mut self, update: impl FnOnce(&mut O) -> O::Head) -> O::Head {
         let value = update(self.get_mut());
         self.replace(value)
     }
 
     /// Swaps this cell's value with another cell and conservatively records this cell as replaced.
-    pub fn swap(&mut self, other: &RefCell<T>) {
+    pub fn swap(&mut self, other: &RefCell<O::Head>) {
         self.child.invalidate();
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head).swap(other);
     }
 
     /// Takes the stored value, leaving its default behind.
-    pub fn take(&mut self) -> T
+    pub fn take(&mut self) -> O::Head
     where
-        T: Default,
+        O::Head: Default,
     {
-        self.replace(T::default())
+        self.replace(O::Head::default())
     }
 }
 
@@ -263,7 +267,7 @@ where
     T: Observe<T, Selection>,
 {
     type Observer<Head, Depth>
-        = RefCellObserver<T, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
+        = RefCellObserver<<T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;

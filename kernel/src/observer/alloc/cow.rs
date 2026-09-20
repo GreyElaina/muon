@@ -33,7 +33,7 @@ impl<'value, B: ToOwned + ?Sized, O, Head: ?Sized, Depth> DerefMut
     for CowObserver<B, O, Head, Depth>
 where
     B: 'value,
-    O: QuasiObserver<Head = B::Owned, InnerDepth = Zero>,
+    O: Observer<Head = B::Owned, InnerDepth = Zero>,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Cow<'value, B>>,
 {
@@ -46,11 +46,10 @@ where
 impl<'value, B, O, Head: ?Sized, Depth> QuasiObserver for CowObserver<B, O, Head, Depth>
 where
     B: ToOwned + ?Sized + 'value,
-    O: QuasiObserver<Head = B::Owned, InnerDepth = Zero>,
+    O: Observer<Head = B::Owned, InnerDepth = Zero>,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Cow<'value, B>>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -67,6 +66,8 @@ where
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Cow<'value, B>>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let cow = AsDeref::<Depth>::as_deref_ptr(head);

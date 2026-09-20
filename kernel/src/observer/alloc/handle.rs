@@ -10,7 +10,7 @@ macro_rules! handle_observe {
         $(
             impl<T: ?Sized> Observe for $handle<T> {
                 type Observer<Head, Depth>
-                    = ShallowObserver<Self, Head, Depth>
+                    = ShallowObserver<Head, Depth>
                 where
                     Depth: Unsigned,
                     Head: AsDerefMut<Depth, Target = Self> + ?Sized;

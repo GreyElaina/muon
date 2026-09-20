@@ -61,7 +61,6 @@ impl<O> DerefMut for Field<O> {
 }
 
 impl<O: QuasiObserver> QuasiObserver for Field<O> {
-    type Head = O::Head;
     type OuterDepth = Succ<O::OuterDepth>;
     type InnerDepth = O::InnerDepth;
 

@@ -1,7 +1,7 @@
 use core::ops::{Deref, DerefMut};
 
 use kernel::{
-    AsDeref, Collect, Invalidate, Observer, Path, Pointer, QuasiObserver, State, StateObserver,
+    AsDeref, Collect, Invalidate, Observer, Path, Pointer, QuasiObserver, State, StatefulObserver,
     Succ, Unsigned, Zero,
 };
 
@@ -9,11 +9,11 @@ pub(crate) struct Recording<D>(Option<Vec<D>>);
 
 /// Observer carrying Loro-specific operation recording state.
 #[repr(transparent)]
-pub struct RecordingObserver<T: ?Sized, Delta, Head: ?Sized, Depth = Zero> {
-    inner: StateObserver<T, Recording<Delta>, Head, Depth>,
+pub struct RecordingObserver<Delta, Head: ?Sized, Depth = Zero> {
+    inner: StatefulObserver<Recording<Delta>, Head, Depth>,
 }
 
-impl<T: ?Sized, Delta, Head: ?Sized, Depth> Deref for RecordingObserver<T, Delta, Head, Depth> {
+impl<Delta, Head: ?Sized, Depth> Deref for RecordingObserver<Delta, Head, Depth> {
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
@@ -21,29 +21,27 @@ impl<T: ?Sized, Delta, Head: ?Sized, Depth> Deref for RecordingObserver<T, Delta
     }
 }
 
-impl<T: ?Sized, Delta, Head: ?Sized, Depth> DerefMut for RecordingObserver<T, Delta, Head, Depth>
+impl<Delta, Head: ?Sized, Depth> DerefMut for RecordingObserver<Delta, Head, Depth>
 where
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = T>,
+    Head: AsDeref<Depth>,
 {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.inner
     }
 }
 
-impl<T: ?Sized, Delta, Head: ?Sized, Depth> RecordingObserver<T, Delta, Head, Depth> {
+impl<Delta, Head: ?Sized, Depth> RecordingObserver<Delta, Head, Depth> {
     pub(crate) fn state_mut(&mut self) -> &mut Recording<Delta> {
         self.inner.state_mut()
     }
 }
 
-impl<T: ?Sized, Delta, Head: ?Sized, Depth> QuasiObserver
-    for RecordingObserver<T, Delta, Head, Depth>
+impl<Delta, Head: ?Sized, Depth> QuasiObserver for RecordingObserver<Delta, Head, Depth>
 where
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = T>,
+    Head: AsDeref<Depth>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -52,13 +50,14 @@ where
     }
 }
 
-unsafe impl<T: ?Sized, Delta, Head: ?Sized, Depth> Observer
-    for RecordingObserver<T, Delta, Head, Depth>
+unsafe impl<Delta, Head: ?Sized, Depth> Observer for RecordingObserver<Delta, Head, Depth>
 where
     Depth: Unsigned,
-    Head: AsDeref<Depth, Target = T>,
-    StateObserver<T, Recording<Delta>, Head, Depth>: Observer<Head = Head>,
+    Head: AsDeref<Depth>,
+    StatefulObserver<Recording<Delta>, Head, Depth>: Observer<Head = Head>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Self::Head) -> Self {
         Self {
             inner: unsafe { Observer::observe(head) },
@@ -74,10 +73,10 @@ where
     }
 }
 
-impl<T: ?Sized, Delta, Head: ?Sized, Depth, Context: ?Sized, Route, Error, Scopes>
-    Collect<Context, Route, Error, Scopes> for RecordingObserver<T, Delta, Head, Depth>
+impl<Delta, Head: ?Sized, Depth, Context: ?Sized, Route, Error, Scopes>
+    Collect<Context, Route, Error, Scopes> for RecordingObserver<Delta, Head, Depth>
 where
-    StateObserver<T, Recording<Delta>, Head, Depth>: Collect<Context, Route, Error, Scopes>,
+    StatefulObserver<Recording<Delta>, Head, Depth>: Collect<Context, Route, Error, Scopes>,
 {
     fn collect(&mut self, path: &Path<'_>, context: &mut Context) -> Result<(), Error> {
         Collect::<Context, Route, Error, Scopes>::collect(&mut self.inner, path, context)

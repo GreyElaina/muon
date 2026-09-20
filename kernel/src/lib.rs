@@ -39,16 +39,16 @@ pub use observer::std::{
 };
 pub use observer::{
     AsDeref, AsDerefCoinductive, AsDerefMut, AsDerefMutCoinductive, AsDerefPtrExt, CollectState,
-    DerefMutUntracked, DerefObserver, DerefPtr, Dirty, Invalidate, Newtype, NewtypeObserver, Noop,
-    NoopObserver, Observed, ObservedGuard, ObservedGuardMut, Observer, ObserverCell, ObserverError,
-    ObserverGuard, Pointer, Poisoned, QuasiObserver, ShallowObserver, State, StateObserver, Succ,
-    Unsigned, Zero, observed, observer_cell,
+    DerefMutUntracked, DerefObserver, DerefPtr, Dirty, HeadOf, Invalidate, Newtype,
+    NewtypeObserver, Noop, NoopObserver, Observed, ObservedGuard, ObservedGuardMut, Observer,
+    ObserverCell, ObserverError, ObserverGuard, Pointer, Poisoned, QuasiObserver, ShallowObserver,
+    State, StatefulObserver, Succ, Unsigned, Zero,
 };
 #[cfg(feature = "alloc")]
 pub use path::{OwnedPath, PathSegment};
 pub use path::{Path, PathStep};
 pub use select::{
-    Composite, Current, Observe, Parent, Select, SelectFrom, Selected, Selection, Slot,
+    Candidates, Composite, Current, Observe, Parent, Select, SelectFrom, Selected, Slot,
 };
 
 /// Adapts a closure body to operate on an observer.

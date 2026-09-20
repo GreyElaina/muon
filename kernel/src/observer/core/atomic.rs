@@ -9,7 +9,7 @@ use core::sync::atomic::Ordering;
 
 use crate::{
     AsDerefMut, Change, CollectState, Invalidate, Observe, Path, Query, Replace, State,
-    StateObserver, Unsigned, emit,
+    StatefulObserver, Unsigned, emit,
 };
 
 /// Initial scalar value retained by an atomic observer.
@@ -81,7 +81,7 @@ macro_rules! atomic_observe {
 
             impl Observe for core::sync::atomic::$atomic {
                 type Observer<Head, Depth>
-                    = StateObserver<Self, AtomicState<$value>, Head, Depth>
+                    = StatefulObserver<AtomicState<$value>, Head, Depth>
                 where
                     Depth: Unsigned,
                     Head: AsDerefMut<Depth, Target = Self> + ?Sized;

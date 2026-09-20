@@ -37,7 +37,8 @@ impl<O, Head: ?Sized, Depth> Deref for OptionObserver<O, Head, Depth> {
 
 impl<O, Head: ?Sized, Depth> DerefMut for OptionObserver<O, Head, Depth>
 where
-    O: QuasiObserver<InnerDepth = Zero, Head: Sized>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Option<O::Head>>,
 {
@@ -49,11 +50,11 @@ where
 
 impl<O, Head: ?Sized, Depth> QuasiObserver for OptionObserver<O, Head, Depth>
 where
-    O: QuasiObserver<InnerDepth = Zero, Head: Sized>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Option<O::Head>>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -64,10 +65,13 @@ where
 
 unsafe impl<O, Head: ?Sized, Depth> Observer for OptionObserver<O, Head, Depth>
 where
-    O: Observer<InnerDepth = Zero, Head: Sized>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Option<O::Head>>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let option = AsDeref::<Depth>::as_deref_ptr(head);
@@ -127,8 +131,9 @@ impl<
 > Collect<Context, (ParentRoute, InnerRoute), Error, Scope<Semantic, Tail>>
     for OptionObserver<O, Head, Depth>
 where
-    O: Observer<InnerDepth = Zero, Head: Sized>
+    O: Observer<InnerDepth = Zero>
         + Collect<Context, InnerRoute, Error, Scope<Semantic, Tail>>,
+    O::Head: Sized,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Option<O::Head>>,
     for<'a> Context: Query<Change<'a, Option<O::Head>>, ParentRoute, Semantic>,
@@ -169,7 +174,8 @@ where
 
 impl<O, Head: ?Sized, Depth> OptionObserver<O, Head, Depth>
 where
-    O: Observer<InnerDepth = Zero, Head: Sized>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
     Depth: Unsigned,
     Head: AsDerefMut<Depth, Target = Option<O::Head>>,
 {

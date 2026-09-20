@@ -23,10 +23,10 @@ pub enum Noop {}
 pub struct Composite<Route>(PhantomData<fn() -> Route>);
 
 /// Compile-time set of observer providers.
-pub struct Select<Providers>(PhantomData<fn() -> Providers>);
+pub struct Candidates<Providers>(PhantomData<fn() -> Providers>);
 
 /// The provider set and the provider selected for one model boundary.
-pub struct Selection<Set, Active>(PhantomData<fn() -> (Set, Active)>);
+pub struct Select<Set, Active>(PhantomData<fn() -> (Set, Active)>);
 
 /// Selects an observer implementation for a target through a route witness.
 pub trait Observe<T: ?Sized = Self, Route = ()> {
@@ -48,7 +48,7 @@ pub trait SelectFrom<T: ?Sized, Route> {
         Head: AsDerefMut<Depth, Target = T> + ?Sized;
 }
 
-impl<T: ?Sized, Providers, Inner> SelectFrom<T, (Slot<0>, Inner)> for Select<Providers>
+impl<T: ?Sized, Providers, Inner> SelectFrom<T, (Slot<0>, Inner)> for Candidates<Providers>
 where
     T: Observe<T, Inner>,
 {
@@ -60,27 +60,27 @@ where
         Head: AsDerefMut<Depth, Target = T> + ?Sized;
 }
 
-impl<T: ?Sized, Providers> SelectFrom<T, (Shallow, ())> for Select<Providers> {
+impl<T: ?Sized, Providers> SelectFrom<T, (Shallow, ())> for Candidates<Providers> {
     type Semantic = ();
     type Observer<Head, Depth>
-        = crate::ShallowObserver<T, Head, Depth>
+        = crate::ShallowObserver<Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = T> + ?Sized;
 }
 
-impl<T: ?Sized, Providers> SelectFrom<T, (Noop, ())> for Select<Providers> {
+impl<T: ?Sized, Providers> SelectFrom<T, (Noop, ())> for Candidates<Providers> {
     type Semantic = ();
     type Observer<Head, Depth>
-        = crate::NoopObserver<T, Head, Depth>
+        = crate::NoopObserver<Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = T> + ?Sized;
 }
 
-impl<T: ?Sized, Providers, Route> Observe<T, (Current, Route)> for Select<Providers>
+impl<T: ?Sized, Providers, Route> Observe<T, (Current, Route)> for Candidates<Providers>
 where
-    Select<Providers>: SelectFrom<T, Route>,
+    Candidates<Providers>: SelectFrom<T, Route>,
 {
     type Observer<Head, Depth>
         = Selected<
@@ -93,9 +93,9 @@ where
         Head: AsDerefMut<Depth, Target = T> + ?Sized;
 }
 
-impl<T: ?Sized, Providers, Route> Observe<T, (Parent, Route)> for Select<Providers>
+impl<T: ?Sized, Providers, Route> Observe<T, (Parent, Route)> for Candidates<Providers>
 where
-    Select<Providers>: SelectFrom<T, Route>,
+    Candidates<Providers>: SelectFrom<T, Route>,
 {
     type Observer<Head, Depth>
         = Selected<
@@ -118,13 +118,13 @@ macro_rules! tuple_observe {
     (@tuple [$(($index:tt, $ty:ident))+]) => { tuple_observe!(@slots [$(($index, $ty))+] ; $(($index, $ty))+); };
     (@slots [$(($index:tt, $ty:ident))+] ; ($slot:tt, $target:ident) $($rest:tt)*) => {
         impl<T: ?Sized, Inner, $($ty),+> SelectFrom<T, (Slot<{ $slot + 1 }>, Inner)>
-            for Select<($($ty,)+)>
+            for Candidates<($($ty,)+)>
         where
-            $target: Observe<T, (Selection<Select<($($ty,)+)>, $target>, Inner)>,
+            $target: Observe<T, (Select<Candidates<($($ty,)+)>, $target>, Inner)>,
         {
-            type Semantic = Selection<Select<($($ty,)+)>, $target>;
+            type Semantic = Select<Candidates<($($ty,)+)>, $target>;
             type Observer<Head, Depth> = <$target as Observe<
-                T, (Selection<Select<($($ty,)+)>, $target>, Inner)
+                T, (Select<Candidates<($($ty,)+)>, $target>, Inner)
             >>::Observer<Head, Depth>
             where
                 Depth: Unsigned,

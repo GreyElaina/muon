@@ -4,7 +4,7 @@ use core::marker::PhantomData;
 
 use crate::{Collect, Observer, Path, QuasiObserver, Query, Scope, Succ};
 
-use super::Selection;
+use super::Select;
 
 /// Keeps a selected observer's records in its current semantic scope.
 pub enum Current {}
@@ -35,7 +35,6 @@ impl<O, Semantic, Mode> core::ops::DerefMut for Selected<O, Semantic, Mode> {
 }
 
 impl<O: QuasiObserver, Semantic, Mode> QuasiObserver for Selected<O, Semantic, Mode> {
-    type Head = O::Head;
     type OuterDepth = Succ<O::OuterDepth>;
     type InnerDepth = O::InnerDepth;
 
@@ -45,6 +44,8 @@ impl<O: QuasiObserver, Semantic, Mode> QuasiObserver for Selected<O, Semantic, M
 }
 
 unsafe impl<O: Observer, Semantic, Mode> Observer for Selected<O, Semantic, Mode> {
+    type Head = O::Head;
+
     unsafe fn observe(head: *mut Self::Head) -> Self {
         Self {
             observer: unsafe { O::observe(head) },
@@ -61,8 +62,7 @@ unsafe impl<O: Observer, Semantic, Mode> Observer for Selected<O, Semantic, Mode
     }
 }
 
-impl<Q: ?Sized, Context: ?Sized, Set, Active> Query<Q, crate::Here, Selection<Set, Active>>
-    for Context
+impl<Q: ?Sized, Context: ?Sized, Set, Active> Query<Q, crate::Here, Select<Set, Active>> for Context
 where
     Context: Query<Q, crate::Here, Active>,
 {
@@ -74,12 +74,12 @@ where
 }
 
 impl<O, Set, Active, Context: ?Sized, Routes, Error, Scopes> Collect<Context, Routes, Error, Scopes>
-    for Selected<O, Selection<Set, Active>, Current>
+    for Selected<O, Select<Set, Active>, Current>
 where
-    O: Collect<Context, Routes, Error, Scope<Selection<Set, Active>, Scopes>>,
+    O: Collect<Context, Routes, Error, Scope<Select<Set, Active>, Scopes>>,
 {
     fn collect(&mut self, path: &Path<'_>, context: &mut Context) -> Result<(), Error> {
-        Collect::<Context, Routes, Error, Scope<Selection<Set, Active>, Scopes>>::collect(
+        Collect::<Context, Routes, Error, Scope<Select<Set, Active>, Scopes>>::collect(
             &mut self.observer,
             path,
             context,
@@ -88,7 +88,7 @@ where
 }
 
 impl<O, Set, Active, Context: ?Sized, Routes, Error, Scopes> Collect<Context, Routes, Error, Scopes>
-    for Selected<O, Selection<Set, Active>, Parent>
+    for Selected<O, Select<Set, Active>, Parent>
 where
     O: Collect<Context, Routes, Error, Scopes>,
 {

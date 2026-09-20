@@ -11,14 +11,18 @@ use crate::{
 };
 use crate::{Observer, ObserverSlot, Pointer, QuasiObserver, Succ, Unsigned, Zero};
 
-trait LazySlot<T> {
-    fn get(&self) -> Option<&T>;
-    fn get_mut(&mut self) -> Option<&mut T>;
-    fn force(&self) -> &T;
-    fn force_mut(&mut self) -> &mut T;
+trait LazySlot {
+    type Value;
+
+    fn get(&self) -> Option<&Self::Value>;
+    fn get_mut(&mut self) -> Option<&mut Self::Value>;
+    fn force(&self) -> &Self::Value;
+    fn force_mut(&mut self) -> &mut Self::Value;
 }
 
-impl<T, F: FnOnce() -> T> LazySlot<T> for LazyCell<T, F> {
+impl<T, F: FnOnce() -> T> LazySlot for LazyCell<T, F> {
+    type Value = T;
+
     fn get(&self) -> Option<&T> {
         LazyCell::get(self)
     }
@@ -37,7 +41,9 @@ impl<T, F: FnOnce() -> T> LazySlot<T> for LazyCell<T, F> {
 }
 
 #[cfg(feature = "std")]
-impl<T, F: FnOnce() -> T> LazySlot<T> for LazyLock<T, F> {
+impl<T, F: FnOnce() -> T> LazySlot for LazyLock<T, F> {
+    type Value = T;
+
     fn get(&self) -> Option<&T> {
         LazyLock::get(self)
     }
@@ -59,14 +65,14 @@ impl<T, F: FnOnce() -> T> LazySlot<T> for LazyLock<T, F> {
 ///
 /// An initialized slot owns a structural child observer. Forcing an uninitialized slot records a
 /// whole-slot replacement for that observation pass; later passes recover structural precision.
-pub struct LazyObserver<T, O, Slot, Head: ?Sized, Depth = Zero> {
+pub struct LazyObserver<O, Slot, Head: ?Sized, Depth = Zero> {
     pointer: Pointer<Head>,
     child: ObserverSlot<Option<O>>,
 
-    marker: PhantomData<(fn(T, Slot), Depth)>,
+    marker: PhantomData<(fn(Slot), Depth)>,
 }
 
-impl<T, O, Slot, Head: ?Sized, Depth> Deref for LazyObserver<T, O, Slot, Head, Depth> {
+impl<O, Slot, Head: ?Sized, Depth> Deref for LazyObserver<O, Slot, Head, Depth> {
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
@@ -75,20 +81,19 @@ impl<T, O, Slot, Head: ?Sized, Depth> Deref for LazyObserver<T, O, Slot, Head, D
     }
 }
 
-impl<T, O, Slot, Head: ?Sized, Depth> DerefMut for LazyObserver<T, O, Slot, Head, Depth> {
+impl<O, Slot, Head: ?Sized, Depth> DerefMut for LazyObserver<O, Slot, Head, Depth> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.child.invalidate();
         &mut self.pointer
     }
 }
 
-impl<T, O, Slot, Head: ?Sized, Depth> QuasiObserver for LazyObserver<T, O, Slot, Head, Depth>
+impl<O, Slot, Head: ?Sized, Depth> QuasiObserver for LazyObserver<O, Slot, Head, Depth>
 where
-    O: QuasiObserver<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
     Depth: Unsigned,
     Head: AsDerefMut<Depth>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -98,7 +103,7 @@ where
 
     fn untracked_ref<Value: ?Sized>(&self) -> &Value
     where
-        Self::Head: AsDeref<Self::InnerDepth, Target = Value>,
+        crate::HeadOf<Self>: AsDeref<Self::InnerDepth, Target = Value>,
     {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head)
@@ -113,13 +118,16 @@ where
     }
 }
 
-unsafe impl<T, O, Slot, Head: ?Sized, Depth> Observer for LazyObserver<T, O, Slot, Head, Depth>
+unsafe impl<O, Slot, Head: ?Sized, Depth> Observer for LazyObserver<O, Slot, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>,
-    Slot: LazySlot<T>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
+    Slot: LazySlot<Value = O::Head>,
     Depth: Unsigned,
     Head: AsDerefMut<Depth, Target = Slot>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let slot = AsDeref::<Depth>::as_deref_ptr(head);
@@ -136,7 +144,7 @@ where
     unsafe fn relocate(this: &mut Self, head: *mut Head) {
         unsafe {
             let slot = AsDeref::<Depth>::as_deref_ptr(head);
-            let value = LazySlot::get_mut(&mut *slot).map(|value| value as *mut T);
+            let value = LazySlot::get_mut(&mut *slot).map(|value| value as *mut O::Head);
             this.child.activate_optional(value);
             Pointer::set_unchecked(&this.pointer, head);
         }
@@ -145,31 +153,19 @@ where
     unsafe fn rebase(this: &mut Self, head: *mut Head) {
         unsafe {
             let slot = AsDeref::<Depth>::as_deref_ptr(head);
-            let value = LazySlot::get_mut(&mut *slot).map(|value| value as *mut T);
+            let value = LazySlot::get_mut(&mut *slot).map(|value| value as *mut O::Head);
             this.child.rebase_optional(value);
             Pointer::set_unchecked(&this.pointer, head);
         }
     }
 }
 
-impl<
-    T,
-    O,
-    Slot,
-    Head: ?Sized,
-    Depth,
-    Context: ?Sized,
-    ParentRoute,
-    InnerRoute,
-    Error,
-    Semantic,
-    Tail,
-> Collect<Context, (ParentRoute, InnerRoute), Error, Scope<Semantic, Tail>>
-    for LazyObserver<T, O, Slot, Head, Depth>
+impl<O, Slot, Head: ?Sized, Depth, Context: ?Sized, ParentRoute, InnerRoute, Error, Semantic, Tail>
+    Collect<Context, (ParentRoute, InnerRoute), Error, Scope<Semantic, Tail>>
+    for LazyObserver<O, Slot, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>
-        + Collect<Context, InnerRoute, Error, Scope<Semantic, Tail>>,
-    Slot: LazySlot<T>,
+    O: Observer<InnerDepth = Zero> + Collect<Context, InnerRoute, Error, Scope<Semantic, Tail>>,
+    Slot: LazySlot<Value = O::Head>,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Slot>,
     for<'a> Context: Query<Change<'a, Slot>, ParentRoute, Semantic>,
@@ -206,10 +202,11 @@ where
 }
 
 #[allow(private_bounds)]
-impl<T, O, Slot, Head: ?Sized, Depth> LazyObserver<T, O, Slot, Head, Depth>
+impl<O, Slot, Head: ?Sized, Depth> LazyObserver<O, Slot, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>,
-    Slot: LazySlot<T>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
+    Slot: LazySlot<Value = O::Head>,
     Depth: Unsigned,
     Head: AsDerefMut<Depth, Target = Slot>,
 {
@@ -225,13 +222,13 @@ where
     pub fn get_mut(&mut self) -> Option<&mut O> {
         let head = unsafe { Pointer::as_mut(&self.pointer) };
         let value = LazySlot::get_mut(AsDerefMut::<Depth>::as_deref_mut(head));
-        let value = value.map(|value| value as *mut T);
+        let value = value.map(|value| value as *mut O::Head);
         unsafe { self.child.activate_optional(value) };
         unsafe { self.child.observer_mut() }.as_mut()
     }
 
     /// Forces initialization and returns the value through a conservative parent escape.
-    pub fn force(&self) -> &T {
+    pub fn force(&self) -> &O::Head {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let slot = AsDeref::<Depth>::as_deref(head);
         self.child.invalidate();
@@ -254,13 +251,13 @@ where
 }
 
 /// Observer for [`LazyCell<T, F>`].
-pub type LazyCellObserver<T, F, O, Head, Depth = Zero> =
-    LazyObserver<T, O, LazyCell<T, F>, Head, Depth>;
+pub type LazyCellObserver<F, O, Head, Depth = Zero> =
+    LazyObserver<O, LazyCell<<O as Observer>::Head, F>, Head, Depth>;
 
 #[cfg(feature = "std")]
 /// Observer for [`LazyLock<T, F>`].
-pub type LazyLockObserver<T, F, O, Head, Depth = Zero> =
-    LazyObserver<T, O, LazyLock<T, F>, Head, Depth>;
+pub type LazyLockObserver<F, O, Head, Depth = Zero> =
+    LazyObserver<O, LazyLock<<O as Observer>::Head, F>, Head, Depth>;
 
 impl<T, F, Selection> Observe<LazyCell<T, F>, Composite<(Selection,)>> for LazyCell<T, F>
 where
@@ -268,7 +265,7 @@ where
     T: Observe<T, Selection>,
 {
     type Observer<Head, Depth>
-        = LazyCellObserver<T, F, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
+        = LazyCellObserver<F, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;
@@ -281,7 +278,7 @@ where
     T: Observe<T, Selection>,
 {
     type Observer<Head, Depth>
-        = LazyLockObserver<T, F, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
+        = LazyLockObserver<F, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;

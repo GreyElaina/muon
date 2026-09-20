@@ -24,9 +24,9 @@ pub(super) fn select_field(
     let ty = &field.ty;
     if field.wrappers().is_empty() && (field.shallow() || field.noop()) {
         let observer = if field.noop() {
-            quote! { __kernel_runtime::NoopObserver<#ty, #head, #depth> }
+            quote! { __kernel_runtime::NoopObserver<#head, #depth> }
         } else {
-            quote! { __kernel_runtime::ShallowObserver<#ty, #head, #depth> }
+            quote! { __kernel_runtime::ShallowObserver<#head, #depth> }
         };
         let observer = if field.scope_parent() {
             quote! { __kernel_runtime::Selected<#observer, (), __kernel_runtime::Parent> }
@@ -71,7 +71,7 @@ pub(super) fn select_field(
         inner = quote! { (__kernel_runtime::Slot<#slot>, #inner) };
     }
 
-    let set = quote! { __kernel_runtime::Select<#provider_tuple> };
+    let set = quote! { __kernel_runtime::Candidates<#provider_tuple> };
     let scope = if field.scope_parent() {
         quote! { __kernel_runtime::Parent }
     } else {

@@ -43,7 +43,6 @@ where
     D: Unsigned,
     S: AsDeref<D, Target = MovableList<T>>,
 {
-    type Head = S;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = D;
 
@@ -58,6 +57,8 @@ where
     S: AsDerefMut<D, Target = MovableList<T>>,
     O: Observer<Head = T, InnerDepth = Zero>,
 {
+    type Head = S;
+
     unsafe fn observe(head: *mut S) -> Self {
         unsafe {
             Self {

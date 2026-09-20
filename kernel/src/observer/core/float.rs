@@ -2,7 +2,7 @@
 
 use crate::{
     AsDerefMut, Change, CollectState, Invalidate, Observe, Path, Query, Replace, State,
-    StateObserver, Unsigned, Zero, emit,
+    StatefulObserver, Unsigned, Zero, emit,
 };
 
 /// Initial-value state for a floating-point observer.
@@ -13,7 +13,7 @@ pub struct FloatState<T> {
 
 /// Observer for built-in floating-point values with NaN-aware equality.
 #[doc(hidden)]
-pub type FloatObserver<T, Head, Depth = Zero> = StateObserver<T, FloatState<T>, Head, Depth>;
+pub type FloatObserver<T, Head, Depth = Zero> = StatefulObserver<FloatState<T>, Head, Depth>;
 
 macro_rules! float_observe {
     ($($ty:ty),* $(,)?) => {

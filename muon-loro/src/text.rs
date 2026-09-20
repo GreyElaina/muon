@@ -110,7 +110,7 @@ where
     }
 }
 
-pub type TextObserver<Head, Depth = Zero> = RecordingObserver<Text, Vec<TextDelta>, Head, Depth>;
+pub type TextObserver<Head, Depth = Zero> = RecordingObserver<Vec<TextDelta>, Head, Depth>;
 
 impl ObserveWith for Text {
     type Observer<Head, Depth>

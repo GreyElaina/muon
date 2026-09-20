@@ -29,10 +29,9 @@ impl<O> DerefMut for DerefObserver<O> {
 impl<O, Depth> QuasiObserver for DerefObserver<O>
 where
     Depth: Unsigned,
-    O: QuasiObserver<InnerDepth = Succ<Depth>>,
+    O: Observer<InnerDepth = Succ<Depth>>,
     O::Head: AsDeref<Depth>,
 {
-    type Head = O::Head;
     type OuterDepth = Succ<O::OuterDepth>;
     type InnerDepth = Depth;
 
@@ -47,6 +46,8 @@ where
     O: Observer<InnerDepth = Succ<Depth>>,
     O::Head: AsDeref<Depth>,
 {
+    type Head = O::Head;
+
     unsafe fn observe(head: *mut Self::Head) -> Self {
         Self {
             inner: unsafe { O::observe(head) },

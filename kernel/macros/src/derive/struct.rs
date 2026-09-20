@@ -11,11 +11,10 @@ struct FieldCode {
     member: TokenStream,
     declaration: TokenStream,
     child: TokenStream,
-    observer_argument: Option<TokenStream>,
+    observer_argument: TokenStream,
     selection: TokenStream,
     selection_param: Option<Ident>,
     predicate: Option<syn::WherePredicate>,
-    quasi_predicate: syn::WherePredicate,
     runtime_predicate: syn::WherePredicate,
     collect_route: Ident,
     construct: TokenStream,
@@ -47,10 +46,7 @@ pub(super) fn expand(input: &Input) -> TokenStream {
         .fields
         .iter()
         .enumerate()
-        .map(|(index, field)| {
-            (field.deref() || !field.wrappers().is_empty())
-                .then(|| type_ident(&input.generics, &format!("__KernelFieldObserver{index}")))
-        })
+        .map(|(index, _)| type_ident(&input.generics, &format!("__KernelFieldObserver{index}")))
         .collect::<Vec<_>>();
 
     let (_, input_type_generics, _) = input.generics.split_for_impl();
@@ -69,7 +65,7 @@ pub(super) fn expand(input: &Input) -> TokenStream {
             &provider_tuple,
             &head,
             &depth,
-            child_params[index].as_ref(),
+            &child_params[index],
             selection_param,
             collect_route,
         ));
@@ -117,11 +113,7 @@ pub(super) fn expand(input: &Input) -> TokenStream {
         .collect::<Vec<_>>();
     let observer_field_arguments = field_codes
         .iter()
-        .filter_map(|field| field.observer_argument.as_ref())
-        .collect::<Vec<_>>();
-    let quasi_predicates = field_codes
-        .iter()
-        .map(|field| &field.quasi_predicate)
+        .map(|field| &field.observer_argument)
         .collect::<Vec<_>>();
     let runtime_predicates = field_codes
         .iter()
@@ -129,10 +121,7 @@ pub(super) fn expand(input: &Input) -> TokenStream {
         .collect::<Vec<_>>();
 
     let mut observer_generics = without_defaults(input.generics.clone());
-    for selection in &selection_params {
-        observer_generics.params.push(parse_quote! { #selection });
-    }
-    for child in child_params.iter().flatten() {
+    for child in &child_params {
         observer_generics.params.push(parse_quote! { #child });
     }
     observer_generics
@@ -141,10 +130,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
     observer_generics
         .params
         .push(parse_quote! { #depth = __kernel_runtime::Zero });
-    observer_generics
-        .make_where_clause()
-        .predicates
-        .extend(selection_predicates.iter().cloned());
     let observer_declaration_generics = &observer_generics;
     let observer_declaration_where = observer_generics.where_clause.as_ref();
     let (observer_impl_generics, observer_type_generics, observer_where) =
@@ -153,7 +138,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
     let observer_arguments = quote! {
         <
             #(#input_arguments,)*
-            #(#selection_params,)*
             #(#observer_field_arguments,)*
             #head,
             #depth
@@ -193,7 +177,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
                     fn(&mut #model),
                     #depth,
                     *mut #head,
-                    fn() -> (#(#selection_params,)*),
                 )>,
             }
         }
@@ -216,7 +199,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
                     fn(&mut #model),
                     #depth,
                     *mut #head,
-                    fn() -> (#(#selection_params,)*),
                 )>,
             ) #observer_declaration_where;
         }
@@ -254,7 +236,7 @@ pub(super) fn expand(input: &Input) -> TokenStream {
         predicates.push(parse_quote! { #depth: __kernel_runtime::Unsigned });
         predicates.push(parse_quote! { #head: __kernel_runtime::AsDeref<#depth, Target = #model> });
         predicates.extend(
-            quasi_predicates
+            runtime_predicates
                 .iter()
                 .map(|predicate| (*predicate).clone()),
         );
@@ -276,10 +258,7 @@ pub(super) fn expand(input: &Input) -> TokenStream {
         runtime_generics.split_for_impl();
 
     let mut collect_generics = without_defaults(input.generics.clone());
-    for selection in &selection_params {
-        collect_generics.params.push(parse_quote! { #selection });
-    }
-    for child in child_params.iter().flatten() {
+    for child in &child_params {
         collect_generics.params.push(parse_quote! { #child });
     }
     collect_generics.params.push(parse_quote! { #head: ?Sized });
@@ -296,7 +275,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
     collect_generics.params.push(parse_quote! { #tail });
     {
         let predicates = &mut collect_generics.make_where_clause().predicates;
-        predicates.extend(selection_predicates.iter().cloned());
         predicates.push(parse_quote! { #depth: __kernel_runtime::Unsigned });
         predicates.push(parse_quote! { #head: __kernel_runtime::AsDeref<#depth, Target = #model> });
         predicates.extend(
@@ -354,8 +332,7 @@ pub(super) fn expand(input: &Input) -> TokenStream {
         .extend(selection_predicates.iter().cloned());
     let (observe_impl_generics, _, observe_where) = observe_generics.split_for_impl();
 
-    let (deref_target, deref_member, outer_depth, quasi_head, deref_mut_body) = if let Some(index) =
-        deref_index
+    let (deref_target, deref_member, outer_depth, deref_mut_body) = if let Some(index) = deref_index
     {
         let field = &field_codes[index];
         let child = &field.child;
@@ -369,7 +346,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
             quote! { __kernel_runtime::Field<#child> },
             member.clone(),
             quote! { __kernel_runtime::Succ<<__kernel_runtime::Field<#child> as __kernel_runtime::QuasiObserver>::OuterDepth> },
-            quote! { <#child as __kernel_runtime::QuasiObserver>::Head },
             quote! {
                 #(__kernel_runtime::QuasiObserver::invalidate(&mut self.#sibling_members);)*
             },
@@ -379,7 +355,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
             quote! { __kernel_runtime::Pointer<#head> },
             pointer_member.clone(),
             quote! { __kernel_runtime::Succ<__kernel_runtime::Zero> },
-            quote! { #head },
             quote! { self.#mutated_member = true; },
         )
     };
@@ -447,7 +422,6 @@ pub(super) fn expand(input: &Input) -> TokenStream {
                 for #observer_ident #quasi_type_generics
                 #quasi_where
             {
-                type Head = #quasi_head;
                 type OuterDepth = #outer_depth;
                 type InnerDepth = #depth;
 
@@ -461,6 +435,8 @@ pub(super) fn expand(input: &Input) -> TokenStream {
                 for #observer_ident #runtime_type_generics
                 #runtime_where
             {
+                type Head = #head;
+
                 unsafe fn observe(head: *mut #head) -> Self {
                     unsafe {
                         let value = __kernel_runtime::AsDerefPtrExt::as_deref_ptr::<#depth>(head);
@@ -544,7 +520,7 @@ pub(super) fn expand_shallow(input: &Input) -> TokenStream {
         #[automatically_derived]
         impl #impl_generics __kernel_runtime::Observe for #model #where_clause {
             type Observer<__KernelHead, __KernelDepth> =
-                __kernel_runtime::ShallowObserver<Self, __KernelHead, __KernelDepth>
+                __kernel_runtime::ShallowObserver<__KernelHead, __KernelDepth>
             where
                 __KernelDepth: __kernel_runtime::Unsigned,
                 __KernelHead: __kernel_runtime::AsDerefMut<__KernelDepth, Target = Self>
@@ -562,7 +538,7 @@ pub(super) fn expand_delegated(input: &Input) -> TokenStream {
     let mut generics = without_defaults(input.generics.clone());
     generics.params.push(parse_quote! { #inner });
     generics.make_where_clause().predicates.push(parse_quote! {
-        __kernel_runtime::Select<(#provider,)>: __kernel_runtime::Observe<
+        __kernel_runtime::Candidates<(#provider,)>: __kernel_runtime::Observe<
             #model,
             (__kernel_runtime::Current, (__kernel_runtime::Slot<1>, #inner))
         >
@@ -577,7 +553,7 @@ pub(super) fn expand_delegated(input: &Input) -> TokenStream {
             #where_clause
         {
             type Observer<__KernelHead, __KernelDepth> =
-                <__kernel_runtime::Select<(#provider,)> as __kernel_runtime::Observe<
+                <__kernel_runtime::Candidates<(#provider,)> as __kernel_runtime::Observe<
                     #model,
                     (__kernel_runtime::Current, (__kernel_runtime::Slot<1>, #inner))
                 >>::Observer<__KernelHead, __KernelDepth>
@@ -597,7 +573,7 @@ fn field_code(
     provider_tuple: &TokenStream,
     head: &Ident,
     depth: &Ident,
-    observer_child: Option<&Ident>,
+    observer_child: &Ident,
     generated_selection_param: Ident,
     collect_route: Ident,
 ) -> FieldCode {
@@ -628,22 +604,9 @@ fn field_code(
         observer_depth,
     );
 
-    let observer_argument = observer_child.map(|_| selected.observer.clone());
-    let child = if let Some(observer_child) = observer_child {
-        observer_child.to_token_stream()
-    } else {
-        selected.observer.clone()
-    };
+    let observer_argument = selected.observer.clone();
+    let child = observer_child.to_token_stream();
 
-    let quasi_predicate = if field.deref() {
-        parse_quote! {
-            #child: __kernel_runtime::QuasiObserver<Head = #head, InnerDepth = __kernel_runtime::Succ<#depth>>
-        }
-    } else {
-        parse_quote! {
-            #child: __kernel_runtime::QuasiObserver<Head = #ty, InnerDepth = __kernel_runtime::Zero>
-        }
-    };
     let runtime_predicate = if field.deref() {
         parse_quote! {
             #child: __kernel_runtime::Observer<Head = #head, InnerDepth = __kernel_runtime::Succ<#depth>>
@@ -710,7 +673,6 @@ fn field_code(
         selection: selected.route,
         selection_param: selected.param,
         predicate: selected.predicate,
-        quasi_predicate,
         runtime_predicate,
         collect_route,
         construct,

@@ -11,14 +11,18 @@ use crate::{
 };
 use crate::{Observer, ObserverSlot, Pointer, QuasiObserver, Succ, Unsigned, Zero};
 
-trait OnceSlot<T> {
-    fn get(&self) -> Option<&T>;
-    fn get_mut(&mut self) -> Option<&mut T>;
-    fn set(&self, value: T) -> Result<(), T>;
-    fn take(&mut self) -> Option<T>;
+trait OnceSlot {
+    type Value;
+
+    fn get(&self) -> Option<&Self::Value>;
+    fn get_mut(&mut self) -> Option<&mut Self::Value>;
+    fn set(&self, value: Self::Value) -> Result<(), Self::Value>;
+    fn take(&mut self) -> Option<Self::Value>;
 }
 
-impl<T> OnceSlot<T> for OnceCell<T> {
+impl<T> OnceSlot for OnceCell<T> {
+    type Value = T;
+
     fn get(&self) -> Option<&T> {
         self.get()
     }
@@ -37,7 +41,9 @@ impl<T> OnceSlot<T> for OnceCell<T> {
 }
 
 #[cfg(feature = "std")]
-impl<T> OnceSlot<T> for OnceLock<T> {
+impl<T> OnceSlot for OnceLock<T> {
+    type Value = T;
+
     fn get(&self) -> Option<&T> {
         self.get()
     }
@@ -60,14 +66,14 @@ impl<T> OnceSlot<T> for OnceLock<T> {
 /// An already initialized value owns a structural child observer. Initialization or arbitrary
 /// access that may change presence falls back to replacement of the whole slot for the current
 /// observation pass.
-pub struct OnceObserver<T, O, Slot, Head: ?Sized, Depth = Zero> {
+pub struct OnceObserver<O, Slot, Head: ?Sized, Depth = Zero> {
     pointer: Pointer<Head>,
     child: ObserverSlot<Option<O>>,
 
-    marker: PhantomData<(fn(T, Slot), Depth)>,
+    marker: PhantomData<(fn(Slot), Depth)>,
 }
 
-impl<T, O, Slot, Head: ?Sized, Depth> Deref for OnceObserver<T, O, Slot, Head, Depth> {
+impl<O, Slot, Head: ?Sized, Depth> Deref for OnceObserver<O, Slot, Head, Depth> {
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
@@ -76,20 +82,19 @@ impl<T, O, Slot, Head: ?Sized, Depth> Deref for OnceObserver<T, O, Slot, Head, D
     }
 }
 
-impl<T, O, Slot, Head: ?Sized, Depth> DerefMut for OnceObserver<T, O, Slot, Head, Depth> {
+impl<O, Slot, Head: ?Sized, Depth> DerefMut for OnceObserver<O, Slot, Head, Depth> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.child.invalidate();
         &mut self.pointer
     }
 }
 
-impl<T, O, Slot, Head: ?Sized, Depth> QuasiObserver for OnceObserver<T, O, Slot, Head, Depth>
+impl<O, Slot, Head: ?Sized, Depth> QuasiObserver for OnceObserver<O, Slot, Head, Depth>
 where
-    O: QuasiObserver<Head = T, InnerDepth = Zero>,
+    O: Observer<InnerDepth = Zero>,
     Depth: Unsigned,
     Head: AsDerefMut<Depth>,
 {
-    type Head = Head;
     type OuterDepth = Succ<Zero>;
     type InnerDepth = Depth;
 
@@ -99,7 +104,7 @@ where
 
     fn untracked_ref<Value: ?Sized>(&self) -> &Value
     where
-        Self::Head: AsDeref<Self::InnerDepth, Target = Value>,
+        crate::HeadOf<Self>: AsDeref<Self::InnerDepth, Target = Value>,
     {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head)
@@ -114,13 +119,16 @@ where
     }
 }
 
-unsafe impl<T, O, Slot, Head: ?Sized, Depth> Observer for OnceObserver<T, O, Slot, Head, Depth>
+unsafe impl<O, Slot, Head: ?Sized, Depth> Observer for OnceObserver<O, Slot, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>,
-    Slot: OnceSlot<T>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
+    Slot: OnceSlot<Value = O::Head>,
     Depth: Unsigned,
     Head: AsDerefMut<Depth, Target = Slot>,
 {
+    type Head = Head;
+
     unsafe fn observe(head: *mut Head) -> Self {
         unsafe {
             let slot = AsDeref::<Depth>::as_deref_ptr(head);
@@ -137,7 +145,7 @@ where
     unsafe fn relocate(this: &mut Self, head: *mut Head) {
         unsafe {
             let slot = AsDeref::<Depth>::as_deref_ptr(head);
-            let value = OnceSlot::get_mut(&mut *slot).map(|value| value as *mut T);
+            let value = OnceSlot::get_mut(&mut *slot).map(|value| value as *mut O::Head);
             this.child.activate_optional(value);
             Pointer::set_unchecked(&this.pointer, head);
         }
@@ -146,31 +154,19 @@ where
     unsafe fn rebase(this: &mut Self, head: *mut Head) {
         unsafe {
             let slot = AsDeref::<Depth>::as_deref_ptr(head);
-            let value = OnceSlot::get_mut(&mut *slot).map(|value| value as *mut T);
+            let value = OnceSlot::get_mut(&mut *slot).map(|value| value as *mut O::Head);
             this.child.rebase_optional(value);
             Pointer::set_unchecked(&this.pointer, head);
         }
     }
 }
 
-impl<
-    T,
-    O,
-    Slot,
-    Head: ?Sized,
-    Depth,
-    Context: ?Sized,
-    ParentRoute,
-    InnerRoute,
-    Error,
-    Semantic,
-    Tail,
-> Collect<Context, (ParentRoute, InnerRoute), Error, Scope<Semantic, Tail>>
-    for OnceObserver<T, O, Slot, Head, Depth>
+impl<O, Slot, Head: ?Sized, Depth, Context: ?Sized, ParentRoute, InnerRoute, Error, Semantic, Tail>
+    Collect<Context, (ParentRoute, InnerRoute), Error, Scope<Semantic, Tail>>
+    for OnceObserver<O, Slot, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>
-        + Collect<Context, InnerRoute, Error, Scope<Semantic, Tail>>,
-    Slot: OnceSlot<T>,
+    O: Observer<InnerDepth = Zero> + Collect<Context, InnerRoute, Error, Scope<Semantic, Tail>>,
+    Slot: OnceSlot<Value = O::Head>,
     Depth: Unsigned,
     Head: AsDeref<Depth, Target = Slot>,
     for<'a> Context: Query<Change<'a, Slot>, ParentRoute, Semantic>,
@@ -207,10 +203,11 @@ where
 }
 
 #[allow(private_bounds)]
-impl<T, O, Slot, Head: ?Sized, Depth> OnceObserver<T, O, Slot, Head, Depth>
+impl<O, Slot, Head: ?Sized, Depth> OnceObserver<O, Slot, Head, Depth>
 where
-    O: Observer<Head = T, InnerDepth = Zero>,
-    Slot: OnceSlot<T>,
+    O: Observer<InnerDepth = Zero>,
+    O::Head: Sized,
+    Slot: OnceSlot<Value = O::Head>,
     Depth: Unsigned,
     Head: AsDerefMut<Depth, Target = Slot>,
 {
@@ -226,13 +223,13 @@ where
     pub fn get_mut(&mut self) -> Option<&mut O> {
         let head = unsafe { Pointer::as_mut(&self.pointer) };
         let value = OnceSlot::get_mut(AsDerefMut::<Depth>::as_deref_mut(head));
-        let value = value.map(|value| value as *mut T);
+        let value = value.map(|value| value as *mut O::Head);
         unsafe { self.child.activate_optional(value) };
         unsafe { self.child.observer_mut() }.as_mut()
     }
 
     /// Initializes the slot, falling back to a whole-slot replacement on success.
-    pub fn set(&self, value: T) -> Result<(), T> {
+    pub fn set(&self, value: O::Head) -> Result<(), O::Head> {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         match OnceSlot::set(AsDeref::<Depth>::as_deref(head), value) {
             Ok(()) => {
@@ -244,7 +241,7 @@ where
     }
 
     /// Initializes the slot when empty and returns its value through a conservative parent escape.
-    pub fn get_or_init(&self, initialize: impl FnOnce() -> T) -> &T {
+    pub fn get_or_init(&self, initialize: impl FnOnce() -> O::Head) -> &O::Head {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let slot = AsDeref::<Depth>::as_deref(head);
         if OnceSlot::get(slot).is_none() {
@@ -257,8 +254,8 @@ where
     /// Fallibly initializes the slot and returns its value through a conservative parent escape.
     pub fn get_or_try_init<Error>(
         &self,
-        initialize: impl FnOnce() -> Result<T, Error>,
-    ) -> Result<&T, Error> {
+        initialize: impl FnOnce() -> Result<O::Head, Error>,
+    ) -> Result<&O::Head, Error> {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let slot = AsDeref::<Depth>::as_deref(head);
         if OnceSlot::get(slot).is_none() {
@@ -269,7 +266,7 @@ where
     }
 
     /// Initializes the slot when empty and returns its child observer using exclusive access.
-    pub fn get_or_init_mut(&mut self, initialize: impl FnOnce() -> T) -> &mut O {
+    pub fn get_or_init_mut(&mut self, initialize: impl FnOnce() -> O::Head) -> &mut O {
         if self.get_mut().is_none() {
             let _ = self.set(initialize());
         }
@@ -279,7 +276,7 @@ where
     /// Fallibly initializes the slot and returns its child observer using exclusive access.
     pub fn get_or_try_init_mut<Error>(
         &mut self,
-        initialize: impl FnOnce() -> Result<T, Error>,
+        initialize: impl FnOnce() -> Result<O::Head, Error>,
     ) -> Result<&mut O, Error> {
         if self.get_mut().is_none() {
             let _ = self.set(initialize()?);
@@ -288,7 +285,7 @@ where
     }
 
     /// Takes the initialized value, if any.
-    pub fn take(&mut self) -> Option<T> {
+    pub fn take(&mut self) -> Option<O::Head> {
         let head = unsafe { Pointer::as_mut(&self.pointer) };
         let value = OnceSlot::take(AsDerefMut::<Depth>::as_deref_mut(head));
         if value.is_some() {
@@ -299,18 +296,20 @@ where
 }
 
 /// Observer for [`OnceCell<T>`].
-pub type OnceCellObserver<T, O, Head, Depth = Zero> = OnceObserver<T, O, OnceCell<T>, Head, Depth>;
+pub type OnceCellObserver<O, Head, Depth = Zero> =
+    OnceObserver<O, OnceCell<<O as Observer>::Head>, Head, Depth>;
 
 #[cfg(feature = "std")]
 /// Observer for [`OnceLock<T>`].
-pub type OnceLockObserver<T, O, Head, Depth = Zero> = OnceObserver<T, O, OnceLock<T>, Head, Depth>;
+pub type OnceLockObserver<O, Head, Depth = Zero> =
+    OnceObserver<O, OnceLock<<O as Observer>::Head>, Head, Depth>;
 
 impl<T, Selection> Observe<OnceCell<T>, Composite<(Selection,)>> for OnceCell<T>
 where
     T: Observe<T, Selection>,
 {
     type Observer<Head, Depth>
-        = OnceCellObserver<T, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
+        = OnceCellObserver<<T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;
@@ -322,7 +321,7 @@ where
     T: Observe<T, Selection>,
 {
     type Observer<Head, Depth>
-        = OnceLockObserver<T, <T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
+        = OnceLockObserver<<T as Observe<T, Selection>>::Observer<T, Zero>, Head, Depth>
     where
         Depth: Unsigned,
         Head: AsDerefMut<Depth, Target = Self> + ?Sized;

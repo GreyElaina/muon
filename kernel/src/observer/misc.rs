@@ -2,7 +2,7 @@
 
 use crate::{Change, Path, Query, Replace, emit};
 
-use super::{CollectState, Invalidate, State, StateObserver, Zero};
+use super::{CollectState, Invalidate, State, StatefulObserver, Zero};
 
 /// Dirty-bit state: conservative mutable access becomes one whole-value replacement.
 pub struct Dirty {
@@ -73,7 +73,7 @@ impl<T: ?Sized, Context: ?Sized, Error, Semantic> CollectState<T, Context, (), E
 }
 
 /// Whole-value observer backed by [`Dirty`].
-pub type ShallowObserver<T, Head, Depth = Zero> = StateObserver<T, Dirty, Head, Depth>;
+pub type ShallowObserver<Head, Depth = Zero> = StatefulObserver<Dirty, Head, Depth>;
 
 /// Observer that deliberately ignores every mutation.
-pub type NoopObserver<T, Head, Depth = Zero> = StateObserver<T, Noop, Head, Depth>;
+pub type NoopObserver<Head, Depth = Zero> = StatefulObserver<Noop, Head, Depth>;
