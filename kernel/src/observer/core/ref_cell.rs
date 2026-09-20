@@ -10,7 +10,7 @@ use crate::{
 };
 
 use crate::{
-    InteriorState, ObservedGuard, ObservedGuardMut, Observer, Pointer, QuasiObserver, Succ,
+    ObservedGuard, ObservedGuardMut, Observer, ObserverSlot, Pointer, QuasiObserver, Succ,
     Unsigned, Zero,
 };
 
@@ -48,33 +48,23 @@ impl core::error::Error for TryObservedBorrowError {}
 /// leaked dynamic borrow detected during collection, conservatively replaces the whole cell.
 pub struct RefCellObserver<T, O, Head: ?Sized, Depth = Zero> {
     pointer: Pointer<Head>,
-    state: InteriorState<O>,
+    child: ObserverSlot<O>,
 
     marker: PhantomData<(T, Depth)>,
-}
-
-impl<T, O, Head: ?Sized, Depth> RefCellObserver<T, O, Head, Depth> {
-    fn escape(&self) {
-        self.state.escape();
-    }
 }
 
 impl<T, O, Head: ?Sized, Depth> Deref for RefCellObserver<T, O, Head, Depth> {
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
-        if !self.state.take_suppression() {
-            self.escape();
-        }
+        self.child.invalidate();
         &self.pointer
     }
 }
 
 impl<T, O, Head: ?Sized, Depth> DerefMut for RefCellObserver<T, O, Head, Depth> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        if !self.state.take_suppression() {
-            self.escape();
-        }
+        self.child.invalidate();
         &mut self.pointer
     }
 }
@@ -90,7 +80,7 @@ where
     type InnerDepth = Depth;
 
     fn invalidate(this: &mut Self) {
-        this.escape();
+        this.child.invalidate();
     }
 
     fn untracked_ref<Value: ?Sized>(&self) -> &Value
@@ -105,11 +95,7 @@ where
     where
         Head: AsDerefMut<Depth, Target = Value>,
     {
-        self.state.suppress_escape();
-        let head = <Pointer<Head> as crate::DerefMutUntracked>::deref_mut_untracked::<
-            Self,
-            Succ<Zero>,
-        >(self);
+        let head = unsafe { Pointer::as_mut(&self.pointer) };
         AsDerefMut::<Depth>::as_deref_mut(head)
     }
 }
@@ -125,7 +111,7 @@ where
             let cell = AsDeref::<Depth>::as_deref_ptr(head);
             Self {
                 pointer: Pointer::new_unchecked(head),
-                state: InteriorState::new(O::observe((*cell).get_mut())),
+                child: ObserverSlot::new(O::observe((*cell).get_mut())),
 
                 marker: PhantomData,
             }
@@ -135,7 +121,7 @@ where
     unsafe fn relocate(this: &mut Self, head: *mut Head) {
         unsafe {
             let cell = AsDeref::<Depth>::as_deref_ptr(head);
-            O::relocate(this.state.child_mut(), (*cell).get_mut());
+            this.child.activate((*cell).get_mut());
             Pointer::set_unchecked(&this.pointer, head);
         }
     }
@@ -143,7 +129,7 @@ where
     unsafe fn rebase(this: &mut Self, head: *mut Head) {
         unsafe {
             let cell = AsDeref::<Depth>::as_deref_ptr(head);
-            this.state.rebase((*cell).get_mut());
+            this.child.rebase((*cell).get_mut());
             Pointer::set_unchecked(&this.pointer, head);
         }
     }
@@ -170,16 +156,16 @@ where
     fn collect(&mut self, path: &Path<'_>, context: &mut Context) -> Result<(), Error> {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let cell = AsDeref::<Depth>::as_deref(head);
-        if !self.state.is_mutated() {
+        if self.child.is_exact() {
             if let Ok(mut guard) = cell.try_borrow_mut() {
-                unsafe { O::relocate(self.state.child_mut(), &mut *guard) }
+                unsafe { self.child.activate(&mut *guard) }
                 return Collect::<Context, InnerRoute, Error, Scope<Semantic, Tail>>::collect(
-                    self.state.child_mut(),
+                    unsafe { self.child.observer_mut() },
                     path,
                     context,
                 );
             }
-            self.escape();
+            self.child.invalidate();
         }
 
         emit::<_, _, Context, ParentRoute, Semantic, Error>(
@@ -203,8 +189,8 @@ where
     pub fn get_mut(&mut self) -> &mut O {
         let head = unsafe { Pointer::as_mut(&self.pointer) };
         let value = AsDerefMut::<Depth>::as_deref_mut(head).get_mut();
-        drop(unsafe { self.state.reattach(value) });
-        self.state.child_mut()
+        unsafe { self.child.activate(value) };
+        unsafe { self.child.observer_mut() }
     }
 
     /// Immutably borrows the stored value and pairs the borrow with its child observer.
@@ -214,19 +200,19 @@ where
 
     /// Attempts to immutably borrow the value and pair it with its child observer.
     pub fn try_borrow(&self) -> Result<ObservedRef<'_, T, O>, TryObservedBorrowError> {
-        if self.state.is_stale() {
+        if self.child.is_stale() {
             let head = unsafe { Pointer::as_ref(&self.pointer) };
             let cell = AsDeref::<Depth>::as_deref(head);
             let mut guard = cell
                 .try_borrow_mut()
                 .map_err(TryObservedBorrowError::Rebuild)?;
-            drop(unsafe { self.state.reattach(&mut *guard) });
+            drop(unsafe { self.child.activate_ref(&mut *guard) });
         }
 
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let cell = AsDeref::<Depth>::as_deref(head);
         let guard = cell.try_borrow().map_err(TryObservedBorrowError::Borrow)?;
-        Ok(self.state.guard(guard))
+        Ok(unsafe { self.child.read(guard) })
     }
 
     /// Mutably borrows the stored value and pairs the borrow with its child observer.
@@ -240,12 +226,12 @@ where
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let cell = AsDeref::<Depth>::as_deref(head);
         let guard = cell.try_borrow_mut()?;
-        Ok(unsafe { self.state.guard_mut(guard) })
+        Ok(unsafe { self.child.write(guard) })
     }
 
     /// Replaces the stored value and conservatively records a whole-cell replacement.
     pub fn replace(&mut self, value: T) -> T {
-        self.escape();
+        self.child.invalidate();
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head).replace(value)
     }
@@ -258,7 +244,7 @@ where
 
     /// Swaps this cell's value with another cell and conservatively records this cell as replaced.
     pub fn swap(&mut self, other: &RefCell<T>) {
-        self.escape();
+        self.child.invalidate();
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         AsDeref::<Depth>::as_deref(head).swap(other);
     }

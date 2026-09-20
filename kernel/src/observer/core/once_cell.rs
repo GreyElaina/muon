@@ -1,6 +1,6 @@
 //! Conditional child observation for once-initialized slots.
 
-use core::cell::{Cell, OnceCell, Ref, RefCell};
+use core::cell::{OnceCell, Ref};
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 #[cfg(feature = "std")]
@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use crate::{
     AsDeref, AsDerefMut, Change, Collect, Composite, Observe, Path, Query, Replace, Scope, emit,
 };
-use crate::{Observer, Pointer, QuasiObserver, Succ, Unsigned, Zero};
+use crate::{Observer, ObserverSlot, Pointer, QuasiObserver, Succ, Unsigned, Zero};
 
 trait OnceSlot<T> {
     fn get(&self) -> Option<&T>;
@@ -62,40 +62,23 @@ impl<T> OnceSlot<T> for OnceLock<T> {
 /// observation pass.
 pub struct OnceObserver<T, O, Slot, Head: ?Sized, Depth = Zero> {
     pointer: Pointer<Head>,
-    child: RefCell<Option<O>>,
-    mutated: Cell<bool>,
-    suppress_escape: Cell<bool>,
+    child: ObserverSlot<Option<O>>,
 
     marker: PhantomData<(fn(T, Slot), Depth)>,
-}
-
-impl<T, O, Slot, Head: ?Sized, Depth> OnceObserver<T, O, Slot, Head, Depth> {
-    fn escape(&self) {
-        self.mutated.set(true);
-    }
-
-    fn invalidate(&mut self) {
-        self.mutated.set(true);
-        *self.child.get_mut() = None;
-    }
 }
 
 impl<T, O, Slot, Head: ?Sized, Depth> Deref for OnceObserver<T, O, Slot, Head, Depth> {
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
-        if !self.suppress_escape.replace(false) {
-            self.escape();
-        }
+        self.child.invalidate();
         &self.pointer
     }
 }
 
 impl<T, O, Slot, Head: ?Sized, Depth> DerefMut for OnceObserver<T, O, Slot, Head, Depth> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        if !self.suppress_escape.replace(false) {
-            self.invalidate();
-        }
+        self.child.invalidate();
         &mut self.pointer
     }
 }
@@ -111,7 +94,7 @@ where
     type InnerDepth = Depth;
 
     fn invalidate(this: &mut Self) {
-        this.invalidate();
+        this.child.invalidate();
     }
 
     fn untracked_ref<Value: ?Sized>(&self) -> &Value
@@ -126,11 +109,7 @@ where
     where
         Head: AsDerefMut<Depth, Target = Value>,
     {
-        self.suppress_escape.set(true);
-        let head = <Pointer<Head> as crate::DerefMutUntracked>::deref_mut_untracked::<
-            Self,
-            Succ<Zero>,
-        >(self);
+        let head = unsafe { Pointer::as_mut(&self.pointer) };
         AsDerefMut::<Depth>::as_deref_mut(head)
     }
 }
@@ -148,9 +127,7 @@ where
             let child = OnceSlot::get_mut(&mut *slot).map(|value| O::observe(value));
             Self {
                 pointer: Pointer::new_unchecked(head),
-                child: RefCell::new(child),
-                mutated: Cell::new(false),
-                suppress_escape: Cell::new(false),
+                child: ObserverSlot::new(child),
 
                 marker: PhantomData,
             }
@@ -160,11 +137,8 @@ where
     unsafe fn relocate(this: &mut Self, head: *mut Head) {
         unsafe {
             let slot = AsDeref::<Depth>::as_deref_ptr(head);
-            match (this.child.get_mut(), OnceSlot::get_mut(&mut *slot)) {
-                (Some(observer), Some(value)) => O::relocate(observer, value),
-                (None, _) => {}
-                (Some(_), None) => panic!("inconsistent once-slot observer state"),
-            }
+            let value = OnceSlot::get_mut(&mut *slot).map(|value| value as *mut T);
+            this.child.activate_optional(value);
             Pointer::set_unchecked(&this.pointer, head);
         }
     }
@@ -172,14 +146,8 @@ where
     unsafe fn rebase(this: &mut Self, head: *mut Head) {
         unsafe {
             let slot = AsDeref::<Depth>::as_deref_ptr(head);
-            match (this.child.get_mut(), OnceSlot::get_mut(&mut *slot)) {
-                (Some(observer), Some(value)) => O::rebase(observer, value),
-                (child @ None, Some(value)) => *child = Some(O::observe(value)),
-                (child @ Some(_), None) => *child = None,
-                (None, None) => {}
-            }
-            this.mutated.set(false);
-            this.suppress_escape.set(false);
+            let value = OnceSlot::get_mut(&mut *slot).map(|value| value as *mut T);
+            this.child.rebase_optional(value);
             Pointer::set_unchecked(&this.pointer, head);
         }
     }
@@ -218,7 +186,7 @@ where
     fn collect(&mut self, path: &Path<'_>, context: &mut Context) -> Result<(), Error> {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let slot = AsDeref::<Depth>::as_deref(head);
-        if self.mutated.get() {
+        if !self.child.is_exact() {
             return emit::<_, _, Context, ParentRoute, Semantic, Error>(
                 context,
                 Change::Replace {
@@ -229,7 +197,7 @@ where
             );
         }
 
-        if let Some(observer) = self.child.get_mut() {
+        if let Some(observer) = unsafe { self.child.observer_mut() }.as_mut() {
             Collect::<Context, InnerRoute, Error, Scope<Semantic, Tail>>::collect(
                 observer, path, context,
             )?;
@@ -248,22 +216,19 @@ where
 {
     /// Returns a shared observer for an initialized value attached before this access.
     ///
-    /// Shared initialization records a parent replacement and makes the child available after the
-    /// next rebase; exclusive [`Self::get_mut`] can attach it immediately.
+    /// Shared initialization records a parent replacement; the next exclusive activation attaches
+    /// the child, and a successful rebase restores exact collection.
     pub fn get(&self) -> Option<Ref<'_, O>> {
-        Ref::filter_map(self.child.borrow(), Option::as_ref).ok()
+        self.child.get()
     }
 
     /// Returns the observer for the initialized value mutably.
     pub fn get_mut(&mut self) -> Option<&mut O> {
         let head = unsafe { Pointer::as_mut(&self.pointer) };
-        let value = OnceSlot::get_mut(AsDerefMut::<Depth>::as_deref_mut(head))?;
-        let observer = match self.child.get_mut() {
-            Some(observer) => observer,
-            slot @ None => slot.insert(unsafe { O::observe(value) }),
-        };
-        unsafe { O::relocate(observer, value) }
-        Some(observer)
+        let value = OnceSlot::get_mut(AsDerefMut::<Depth>::as_deref_mut(head));
+        let value = value.map(|value| value as *mut T);
+        unsafe { self.child.activate_optional(value) };
+        unsafe { self.child.observer_mut() }.as_mut()
     }
 
     /// Initializes the slot, falling back to a whole-slot replacement on success.
@@ -271,7 +236,7 @@ where
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         match OnceSlot::set(AsDeref::<Depth>::as_deref(head), value) {
             Ok(()) => {
-                self.escape();
+                self.child.invalidate();
                 Ok(())
             }
             Err(value) => Err(value),
@@ -285,7 +250,7 @@ where
         if OnceSlot::get(slot).is_none() {
             let _ = OnceSlot::set(slot, initialize());
         }
-        self.escape();
+        self.child.invalidate();
         OnceSlot::get(slot).expect("once slot remained uninitialized")
     }
 
@@ -299,7 +264,7 @@ where
         if OnceSlot::get(slot).is_none() {
             let _ = OnceSlot::set(slot, initialize()?);
         }
-        self.escape();
+        self.child.invalidate();
         Ok(OnceSlot::get(slot).expect("once slot remained uninitialized"))
     }
 
@@ -327,7 +292,7 @@ where
         let head = unsafe { Pointer::as_mut(&self.pointer) };
         let value = OnceSlot::take(AsDerefMut::<Depth>::as_deref_mut(head));
         if value.is_some() {
-            self.invalidate();
+            self.child.invalidate();
         }
         value
     }

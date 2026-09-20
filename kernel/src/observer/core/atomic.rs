@@ -1,4 +1,9 @@
-//! Value observation for atomic scalars from `core`.
+//! Final-value observation for atomic scalars from `core`.
+//!
+//! The initial and collection-time values are loaded with [`Ordering::Relaxed`]. Observation
+//! detects a changed final value; it does not synchronize other memory, retain intermediate
+//! operations, or distinguish an ABA sequence from no change. The tracked scope must provide any
+//! stronger synchronization required by its application.
 
 use core::sync::atomic::Ordering;
 

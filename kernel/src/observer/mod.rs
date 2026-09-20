@@ -7,12 +7,12 @@ mod depth;
 mod deref;
 mod dirty;
 mod guard;
-mod interior;
 mod lifecycle;
 mod newtype;
 mod ops;
 mod pointer;
 mod quasi;
+mod slot;
 mod state;
 #[cfg(feature = "std")]
 pub mod std;
@@ -25,13 +25,13 @@ pub use depth::{
 pub use deref::DerefObserver;
 pub use dirty::{Dirty, Noop, NoopObserver, ShallowObserver};
 pub use guard::{ObservedGuard, ObservedGuardMut};
-pub(crate) use interior::InteriorState;
 pub use lifecycle::{
     Observed, ObserverCell, ObserverError, ObserverGuard, Poisoned, observed, observer_cell,
 };
 pub use newtype::{Newtype, NewtypeObserver};
 pub use pointer::Pointer;
 pub use quasi::{DerefMutUntracked, Invalidate, QuasiObserver};
+pub(crate) use slot::ObserverSlot;
 pub use state::{CollectState, State, StateObserver};
 
 mod private {

@@ -19,7 +19,7 @@ pub use collect::{
     Change, Collect, Field, Fields, Here, Query, Replace, Scope, Through, collect, collect_async,
     emit,
 };
-pub(crate) use observer::InteriorState;
+pub(crate) use observer::ObserverSlot;
 #[cfg(feature = "alloc")]
 pub use observer::alloc::{CowObserver, StringObserver};
 pub use observer::core::{

@@ -122,8 +122,13 @@ impl<O: Observer> ObserverCell<O> {
     ///
     /// `model` must be the same logical value previously observed by this cell.
     pub unsafe fn escape<'model>(&mut self, model: &'model mut O::Head) -> &'model mut O::Head {
+        if self.phase == Phase::Poisoned {
+            return model;
+        }
+        self.phase = Phase::Poisoned;
         unsafe { O::relocate(&mut self.observer, model) };
         QuasiObserver::invalidate(&mut self.observer);
+        self.phase = Phase::Ready;
         model
     }
 
@@ -140,7 +145,9 @@ impl<O: Observer> ObserverCell<O> {
         if self.phase == Phase::Poisoned {
             return Err(Poisoned);
         }
+        self.phase = Phase::Poisoned;
         unsafe { O::relocate(&mut self.observer, model) };
+        self.phase = Phase::Ready;
         Ok(ObserverGuard {
             observer: &mut self.observer,
             marker: PhantomData,
@@ -178,8 +185,14 @@ impl<O: Observer> ObserverCell<O> {
             return Err(ObserverError::Poisoned);
         }
 
+        self.phase = Phase::Poisoned;
         unsafe { O::relocate(&mut self.observer, model) };
-        self.deliver_bound(context)?;
+        Collect::<Context, Routes, Error, Scope<(), ()>>::collect(
+            &mut self.observer,
+            &Path::root(),
+            context,
+        )
+        .map_err(ObserverError::Collect)?;
         unsafe { O::rebase(&mut self.observer, model) };
         self.phase = Phase::Ready;
         Ok(())
@@ -220,7 +233,9 @@ impl<O: Observer> ObserverCell<O> {
             return Err(ObserverError::Poisoned);
         }
 
+        self.phase = Phase::Poisoned;
         unsafe { O::relocate(&mut self.observer, model) };
+        self.phase = Phase::Ready;
         let output = body(&mut self.observer);
         self.deliver_bound(context)?;
         unsafe { O::rebase(&mut self.observer, model) };
@@ -230,6 +245,7 @@ impl<O: Observer> ObserverCell<O> {
 
     /// Discards pending facts and starts a new observation baseline at `model`.
     pub fn reset(&mut self, model: &mut O::Head) {
+        self.phase = Phase::Poisoned;
         unsafe { O::rebase(&mut self.observer, model) };
         self.phase = Phase::Ready;
     }

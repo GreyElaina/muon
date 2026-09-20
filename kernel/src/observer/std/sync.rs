@@ -11,7 +11,7 @@ use crate::{
     AsDeref, AsDerefMut, Change, Collect, Composite, Observe, ObservedGuard, ObservedGuardMut,
     Path, Query, Replace, Scope, emit,
 };
-use crate::{InteriorState, Observer, Pointer, QuasiObserver, Succ, Unsigned, Zero};
+use crate::{Observer, ObserverSlot, Pointer, QuasiObserver, Succ, Unsigned, Zero};
 
 #[doc(hidden)]
 pub trait ExclusiveLock {
@@ -87,7 +87,7 @@ impl<T> ExclusiveLock for RwLock<T> {
 #[doc(hidden)]
 pub struct LockObserver<O, Lock, Head: ?Sized, Depth = Zero> {
     pointer: Pointer<Head>,
-    state: InteriorState<O>,
+    child: ObserverSlot<O>,
 
     marker: PhantomData<(fn(Lock), Depth)>,
 }
@@ -96,18 +96,14 @@ impl<O, Lock, Head: ?Sized, Depth> Deref for LockObserver<O, Lock, Head, Depth> 
     type Target = Pointer<Head>;
 
     fn deref(&self) -> &Self::Target {
-        if !self.state.take_suppression() {
-            self.state.escape();
-        }
+        self.child.invalidate();
         &self.pointer
     }
 }
 
 impl<O, Lock, Head: ?Sized, Depth> DerefMut for LockObserver<O, Lock, Head, Depth> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        if !self.state.take_suppression() {
-            self.state.escape();
-        }
+        self.child.invalidate();
         &mut self.pointer
     }
 }
@@ -123,7 +119,7 @@ where
     type InnerDepth = Depth;
 
     fn invalidate(this: &mut Self) {
-        this.state.escape();
+        this.child.invalidate();
     }
 
     fn untracked_ref<Value: ?Sized>(&self) -> &Value
@@ -138,11 +134,7 @@ where
     where
         Head: AsDerefMut<Depth, Target = Value>,
     {
-        self.state.suppress_escape();
-        let head = <Pointer<Head> as crate::DerefMutUntracked>::deref_mut_untracked::<
-            Self,
-            Succ<Zero>,
-        >(self);
+        let head = unsafe { Pointer::as_mut(&self.pointer) };
         AsDerefMut::<Depth>::as_deref_mut(head)
     }
 }
@@ -160,7 +152,7 @@ where
             let value = ExclusiveLock::get_mut(&mut *lock).unwrap_or_else(PoisonError::into_inner);
             Self {
                 pointer: Pointer::new_unchecked(head),
-                state: InteriorState::new(O::observe(value)),
+                child: ObserverSlot::new(O::observe(value)),
 
                 marker: PhantomData,
             }
@@ -171,7 +163,7 @@ where
         unsafe {
             let lock = AsDeref::<Depth>::as_deref_ptr(head);
             let value = ExclusiveLock::get_mut(&mut *lock).unwrap_or_else(PoisonError::into_inner);
-            O::relocate(this.state.child_mut(), value);
+            this.child.activate(value);
             Pointer::set_unchecked(&this.pointer, head);
         }
     }
@@ -180,7 +172,7 @@ where
         unsafe {
             let lock = AsDeref::<Depth>::as_deref_ptr(head);
             let value = ExclusiveLock::get_mut(&mut *lock).unwrap_or_else(PoisonError::into_inner);
-            this.state.rebase(value);
+            this.child.rebase(value);
             Pointer::set_unchecked(&this.pointer, head);
         }
     }
@@ -219,12 +211,12 @@ where
     fn collect(&mut self, path: &Path<'_>, context: &mut Context) -> Result<(), Error> {
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let lock = AsDeref::<Depth>::as_deref(head);
-        if !self.state.is_mutated() {
+        if self.child.is_exact() {
             let mut guard = match lock.try_acquire() {
                 Ok(guard) => guard,
                 Err(error) => {
                     drop(error);
-                    self.state.escape();
+                    self.child.invalidate();
                     return emit::<_, _, Context, ParentRoute, Semantic, Error>(
                         context,
                         Change::Replace {
@@ -235,9 +227,9 @@ where
                     );
                 }
             };
-            drop(unsafe { self.state.reattach(&mut *guard) });
+            unsafe { self.child.activate(&mut *guard) };
             return Collect::<Context, InnerRoute, Error, Scope<Semantic, Tail>>::collect(
-                self.state.child_mut(),
+                unsafe { self.child.observer_mut() },
                 path,
                 context,
             );
@@ -272,7 +264,7 @@ where
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let lock = AsDeref::<Depth>::as_deref(head);
         if ExclusiveLock::is_poisoned(lock) {
-            self.state.escape();
+            self.child.fallback();
             ExclusiveLock::clear_poison(lock);
         }
     }
@@ -283,14 +275,14 @@ where
         let lock = AsDerefMut::<Depth>::as_deref_mut(head);
         match ExclusiveLock::get_mut(lock) {
             Ok(value) => {
-                drop(unsafe { self.state.reattach(value) });
-                Ok(self.state.child_mut())
+                unsafe { self.child.activate(value) };
+                Ok(unsafe { self.child.observer_mut() })
             }
             Err(error) => {
                 let value = error.into_inner();
-                self.state.escape();
-                drop(unsafe { self.state.reattach(value) });
-                Err(PoisonError::new(self.state.child_mut()))
+                self.child.fallback();
+                unsafe { self.child.activate(value) };
+                Err(PoisonError::new(unsafe { self.child.observer_mut() }))
             }
         }
     }
@@ -299,11 +291,11 @@ where
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let lock = AsDeref::<Depth>::as_deref(head);
         match lock.acquire() {
-            Ok(guard) => Ok(unsafe { self.state.guard_mut(guard) }),
+            Ok(guard) => Ok(unsafe { self.child.write(guard) }),
             Err(error) => {
                 let guard = error.into_inner();
-                self.state.escape();
-                Err(PoisonError::new(unsafe { self.state.guard_mut(guard) }))
+                self.child.fallback();
+                Err(PoisonError::new(unsafe { self.child.write(guard) }))
             }
         }
     }
@@ -314,18 +306,15 @@ where
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let lock = AsDeref::<Depth>::as_deref(head);
         match lock.try_acquire() {
-            Ok(guard) => Ok(unsafe { self.state.guard_mut(guard) }),
+            Ok(guard) => Ok(unsafe { self.child.write(guard) }),
             Err(TryLockError::Poisoned(error)) => {
                 let guard = error.into_inner();
-                self.state.escape();
+                self.child.fallback();
                 Err(TryLockError::Poisoned(PoisonError::new(unsafe {
-                    self.state.guard_mut(guard)
+                    self.child.write(guard)
                 })))
             }
-            Err(TryLockError::WouldBlock) => {
-                self.state.escape();
-                Err(TryLockError::WouldBlock)
-            }
+            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
         }
     }
 }
@@ -380,7 +369,7 @@ where
     Head: AsDerefMut<Depth, Target = RwLock<T>>,
 {
     fn try_refresh_for_read(&self) -> bool {
-        if !self.state.is_stale() {
+        if !self.child.is_stale() {
             return true;
         }
         let head = unsafe { Pointer::as_ref(&self.pointer) };
@@ -388,12 +377,12 @@ where
         let mut guard = match lock.try_write() {
             Ok(guard) => guard,
             Err(TryLockError::Poisoned(error)) => {
-                self.state.escape();
+                self.child.fallback();
                 error.into_inner()
             }
             Err(TryLockError::WouldBlock) => return false,
         };
-        drop(unsafe { self.state.reattach(&mut *guard) });
+        drop(unsafe { self.child.activate_ref(&mut *guard) });
         true
     }
 
@@ -410,11 +399,11 @@ where
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let lock = AsDeref::<Depth>::as_deref(head);
         match lock.read() {
-            Ok(guard) => Ok(self.state.guard(guard)),
+            Ok(guard) => Ok(unsafe { self.child.read(guard) }),
             Err(error) => {
                 let guard = error.into_inner();
-                self.state.escape();
-                Err(PoisonError::new(self.state.guard(guard)))
+                self.child.fallback();
+                Err(PoisonError::new(unsafe { self.child.read(guard) }))
             }
         }
     }
@@ -422,24 +411,20 @@ where
     /// Attempts to read-lock the value and pair it with its shared child observer.
     pub fn try_read(&self) -> TryLockResult<ObservedRwLockReadGuard<'_, T, O>> {
         if !self.try_refresh_for_read() {
-            self.state.escape();
             return Err(TryLockError::WouldBlock);
         }
         let head = unsafe { Pointer::as_ref(&self.pointer) };
         let lock = AsDeref::<Depth>::as_deref(head);
         match lock.try_read() {
-            Ok(guard) => Ok(self.state.guard(guard)),
+            Ok(guard) => Ok(unsafe { self.child.read(guard) }),
             Err(TryLockError::Poisoned(error)) => {
                 let guard = error.into_inner();
-                self.state.escape();
-                Err(TryLockError::Poisoned(PoisonError::new(
-                    self.state.guard(guard),
-                )))
+                self.child.fallback();
+                Err(TryLockError::Poisoned(PoisonError::new(unsafe {
+                    self.child.read(guard)
+                })))
             }
-            Err(TryLockError::WouldBlock) => {
-                self.state.escape();
-                Err(TryLockError::WouldBlock)
-            }
+            Err(TryLockError::WouldBlock) => Err(TryLockError::WouldBlock),
         }
     }
 
